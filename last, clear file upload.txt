@@ -1,0 +1,39 @@
+REPORT z_rih_test3.
+
+
+
+
+DATA: datatab        TYPE table_of_strings,
+      lv_file        TYPE string,
+      lt_data        TYPE TABLE OF text8192,
+      lv_config_data TYPE string.
+
+
+PARAMETERS: p_file  LIKE rlgrap-filename,
+            p_clear TYPE c LENGTH 1 NO-DISPLAY. "<- i hide it
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+  CALL FUNCTION 'KD_GET_FILENAME_ON_F4'
+    CHANGING
+      file_name = p_file.
+
+
+  lv_file = p_file.
+
+  CALL METHOD cl_gui_frontend_services=>gui_upload
+    EXPORTING
+      filename = lv_file
+      filetype = 'ASC'
+    CHANGING
+      data_tab = datatab
+    EXCEPTIONS
+      OTHERS   = 1.
+
+
+  lt_data = datatab.
+
+  CONCATENATE LINES OF lt_data INTO lv_config_data.
+  zcl_pa3_config=>upload_config( iv_config = lv_config_data iv_clear_config = p_clear ).
+
+START-OF-SELECTION.
+  WRITE:/ lv_config_data.
