@@ -1,0 +1,141 @@
+  METHOD read_docflow_count.
+*   DESCRIPTION: Read docflow_h
+
+    INCLUDE : ztp_ir_constants, crm_object_names_con.
+
+    TYPES: BEGIN OF lty_doc_keys,
+             objkey_a TYPE crmt_object_guid,
+             objkey_b TYPE crmt_object_guid,
+           END OF lty_doc_keys.
+    DATA:
+      lt_doc_key      TYPE TABLE OF lty_doc_keys,
+      ls_doc_key      TYPE lty_doc_keys,
+      lt_ci_docflow   TYPE crmt_doc_flow_wrkt,
+      lt_doc_flow     TYPE crmt_doc_flow_wrkt,
+      ls_doc_flow     TYPE LINE OF crmt_doc_flow_wrkt,
+      lv_objkey       TYPE crmt_doc_flow_id_wrk,
+      lt_bizagi_ids   TYPE TABLE OF crmt_objref_object_id, 
+      lv_bizagi_id    TYPE qmnum, 
+      ls_bizagiheader TYPE ztp_claims, 
+      lt_return       TYPE TABLE OF bapiret2, 
+      lv_rfcdest      TYPE rfcdest. 
+
+    cs_entity-nwa_linked = 'N'. 
+    CHECK it_docflow IS NOT INITIAL. 
+    zcl_ir_util=>get_rfc_destination( EXPORTING im_msg_srv = cl_bsp_wd_message_service=>get_instance( ) RECEIVING em_rfcdest = lv_rfcdest ). 
+
+    LOOP AT it_docflow INTO ls_doc_flow.
+      ls_doc_key-objkey_a = ls_doc_flow-objkey_a.
+      ls_doc_key-objkey_b = ls_doc_flow-objkey_b.
+      APPEND ls_doc_key TO lt_doc_key.
+
+      IF ls_doc_flow-objtype_a = zir_object_types-service_notif OR ls_doc_flow-objtype_a = zir_object_types-ib_notif.
+        APPEND ls_doc_flow-objkey_a TO lt_bizagi_ids.
+      ENDIF.
+      IF ls_doc_flow-objtype_b = zir_object_types-service_notif OR ls_doc_flow-objtype_b = zir_object_types-ib_notif.
+        APPEND ls_doc_flow-objkey_a TO lt_bizagi_ids.
+      ENDIF.
+
+      IF ls_doc_flow-objtype_a = zir_object_types-equip_nwa OR ls_doc_flow-objtype_a = zir_object_types-install_nwa OR
+         ls_doc_flow-objtype_b = zir_object_types-equip_nwa OR ls_doc_flow-objtype_b = zir_object_types-install_nwa. 
+        cs_entity-nwa_linked = 'Y'. 
+      ENDIF. 
+    ENDLOOP.
+
+    SELECT DISTINCT process_type , object_id , status, guid "find all active linked CIs
+      FROM zsearch_indx INTO TABLE @DATA(lt_linked_cis)
+      FOR ALL ENTRIES IN @lt_doc_key
+      WHERE ( guid = @lt_doc_key-objkey_a OR
+      guid = @lt_doc_key-objkey_b ) AND
+      process_type = @zir_proctype-known_issue AND
+      status NOT IN (
+        @zir_status_techn-ki_merged ,
+        @zir_status_techn-ki_canceled ).
+
+    IF lines( lt_linked_cis ) > 0. "ideally - 1 or less
+
+      cs_entity-ci_id = lt_linked_cis[ 1 ]-object_id. 
+
+      CALL FUNCTION 'CRM_DOC_FLOW_READ_OB'
+        EXPORTING
+          iv_header_guid  = CONV crmt_object_guid( lt_linked_cis[ 1 ]-guid )
+        IMPORTING
+          et_doc_flow_wrk = lt_ci_docflow.
+
+      LOOP AT lt_ci_docflow INTO ls_doc_flow. "doc flows of active CI
+        ls_doc_key-objkey_a = ls_doc_flow-objkey_a.
+        ls_doc_key-objkey_b = ls_doc_flow-objkey_b.
+        APPEND ls_doc_key TO lt_doc_key.
+      ENDLOOP.
+    ENDIF.
+
+    SELECT DISTINCT process_type , object_id , status FROM zsearch_indx
+      INTO TABLE @DATA(lt_docflow) FOR ALL ENTRIES IN @lt_doc_key
+      WHERE ( guid = @lt_doc_key-objkey_a OR
+      guid = @lt_doc_key-objkey_b ) AND
+      process_type <> @zir_proctype-known_issue AND
+      process_type <> @zir_proctype-issue.
+
+    IF sy-subrc = 0.
+      DATA(lv_docflow_tmp) = lt_docflow[].
+      DELETE lt_docflow WHERE process_type <> zir_proctype-permanent_sol.
+      DELETE lt_docflow WHERE status EQ zir_status_techn-ps_replaced OR status EQ zir_status_techn-ps_cancelled OR status EQ zir_status_techn-ps_outdated.
+      cs_entity-ps_connected = lines( lt_docflow ).
+      lt_docflow = lv_docflow_tmp.
+      DELETE lt_docflow WHERE process_type <> zir_proctype-containm_sol.
+      DELETE lt_docflow WHERE status EQ zir_status_techn-cs_rejected OR status EQ zir_status_techn-cs_cancelled OR status EQ zir_status_techn-cs_expired.
+      cs_entity-cs_connected = lines( lt_docflow ).
+    ENDIF.
+
+    READ TABLE it_docflow INTO DATA(ls_order) WITH KEY objtype_a = zir_object_types-sales_order.
+    IF sy-subrc = 0.
+      cs_entity-vbeln = ls_order-objkey_a.
+    ENDIF.
+    READ TABLE it_docflow INTO ls_order WITH KEY objtype_a = zir_object_types-prod_order.
+    IF sy-subrc = 0.
+      cs_entity-prodorderno = ls_order-objkey_a.
+
+    ELSE.
+      READ TABLE it_docflow INTO ls_order WITH KEY objtype_b = zir_object_types-prod_order.
+      IF sy-subrc = 0.
+        cs_entity-prodorderno = ls_order-objkey_b.
+      ENDIF.
+
+    ENDIF.
+
+    IF cs_entity-prodorderno IS INITIAL. 
+      SELECT SINGLE zzprodorderno FROM zsearch_indx 
+          INTO ( @cs_entity-prodorderno )
+          WHERE object_id = @gv_object_id AND process_type = @zir_proctype-issue.
+    ENDIF. 
+
+    IF lt_bizagi_ids IS NOT INITIAL.
+
+      SELECT * FROM ztp_bizagi_cases INTO TABLE @DATA(lt_bizagi_cases)
+          FOR ALL ENTRIES IN @lt_bizagi_ids
+          WHERE claim_id = @lt_bizagi_ids-table_line
+            AND ti_id = @cs_entity-object_id.
+
+      IF lines( lt_bizagi_cases ) > 0.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = lt_bizagi_cases[ 1 ]-claim_id
+          IMPORTING
+            output = lv_bizagi_id.
+
+        CALL FUNCTION '/TPISP/YI_GET_NOTIF_DETAILS'
+          DESTINATION lv_rfcdest
+          EXPORTING
+            i_qmnum      = lv_bizagi_id
+          IMPORTING
+            e_notif_data = ls_bizagiheader
+          TABLES
+            return       = lt_return.
+
+        cs_entity-claim_number = lt_bizagi_cases[ 1 ]-claim_id.
+        cs_entity-claim_title = ls_bizagiheader-qmtxt.
+
+      ENDIF.
+    ENDIF.
+
+  ENDMETHOD.
