@@ -1,0 +1,622 @@
+  METHOD update_custext.
+*   DESCRIPTION: Update customer_h
+*------------------------------------------------------------------------*¨
+
+    INCLUDE z_ir_constants.
+
+    DATA ls_custext TYPE crmst_customerh_btil.
+    DATA: lv_prod_order        TYPE aufnr, 
+          lt_cust_mat          TYPE ztp_porder_tty,
+          lt_return            TYPE TABLE OF bapiret2,
+          ls_pheader           TYPE ztp_bapi_alm_order_header_e,
+          ls_psrvdata          TYPE ztp_bapi_alm_order_srvdat_e,
+          ls_bapi_view         TYPE order_view,
+          lt_sales_documents   TYPE TABLE OF sales_key,
+          ls_sales_documents   TYPE sales_key,
+          lt_order_headers_out TYPE TABLE OF bapisdhd,
+          ls_order_headers_out TYPE bapisdhd,
+          ls_adminh            TYPE crmst_adminh_btil, 
+          lv_eq_mat            TYPE comt_product_id. 
+
+    ir_adminh->get_properties( IMPORTING es_attributes = ls_adminh ). 
+    DATA(lr_custext) = ir_adminh->get_related_entity('BTHeaderCustExt').
+    CHECK lr_custext IS BOUND. 
+    lr_custext->get_properties( IMPORTING es_attributes = ls_custext ).
+
+*--> if alarm code was updated
+    IF ls_custext-zzalarm_code <> gs_input_data-alarm_code.
+      IF gs_input_data-alarm_code IS NOT INITIAL. 
+*        IF match( val = gs_input_data-alarm_code regex = '^[0-9]{9}$') = ''. 
+        IF NOT ( gs_input_data-issue_detected = '02' AND gs_input_data-issue_seen = '02' ) AND  match( val = gs_input_data-alarm_code regex = '^[0-9]{9}$') = ''.
+*        IF NEW zcl_ir_alarm_controller( )->validate_alarm_code( 
+*              iv_alarm_code        = gs_input_data-alarm_code
+*              iv_b_group           = CONV #( gs_input_data-bgroup_desc ) 
+**              iv_b_group           = CONV #( gs_input_data-bgroup ) 
+*              iv_dev_step          = gs_input_data-dev_step
+*              iv_machine_system    = gs_input_data-machine_type ) EQ abap_false.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = zcx_qma_exception=>zcx_invalid_alarm_code.
+        ENDIF.
+      ENDIF. 
+*      ELSE. 
+      lr_custext->set_property_as_string(
+            iv_attr_name = 'ZZALARM_CODE'
+            iv_value = CONV #( gs_input_data-alarm_code ) ).
+      rv_updated = abap_true.
+*      ENDIF. 
+    ENDIF.
+
+*--> if parts quantity
+
+    IF gs_input_data-area = 'PackMat' OR gs_input_data-area = 'AddMat'.
+      DATA(ls_quantity) = gs_input_data-pm_quantity.
+      DATA(ls_uom) = gs_input_data-pm_unit.
+    ELSE.
+      ls_quantity = gs_input_data-part_quantity.
+      ls_uom = gs_input_data-part_unit.
+    ENDIF.
+
+    IF ls_custext-zzclaimquan <> ls_quantity.
+      lr_custext->set_property(
+             iv_attr_name = 'ZZCLAIMQUAN'
+             iv_value = ls_quantity ).
+      rv_updated = abap_true.
+    ENDIF.
+
+*--> if parts unit was updated
+    IF ls_custext-zzclaimquanum <> ls_uom.
+      IF ls_uom IS NOT INITIAL.
+        SELECT SINGLE msehi INTO @DATA(lv_msehi)
+                  FROM  t006a WHERE mseh3 = @ls_uom.
+        IF sy-subrc = 0.
+          lr_custext->set_property(
+           iv_attr_name = 'ZZCLAIMQUANUM'
+           iv_value = lv_msehi ).
+          rv_updated = abap_true.
+        ENDIF.
+      ELSE. 
+        lr_custext->set_property( 
+          iv_attr_name = 'ZZCLAIMQUANUM'
+          iv_value = '' ).
+        rv_updated = abap_true.
+      ENDIF.
+    ENDIF.
+
+*--> if parts running hours
+    IF ls_custext-zzmatrunhours <> gs_input_data-part_run_hrs.
+      lr_custext->set_property(
+             iv_attr_name = 'ZZMATRUNHOURS'
+             iv_value = gs_input_data-part_run_hrs ).
+      rv_updated = abap_true.
+    ENDIF.
+
+
+*--> Solution Implemented
+    IF gs_input_data-solutionimpl <> ls_custext-zzsolutionimpl.
+      IF gs_input_data-solutionimpl IS NOT INITIAL.
+        SELECT SINGLE * FROM dd07t INTO @DATA(ls_dd07t_s)
+                                     WHERE  domname = 'ZDTEL000022' AND
+                                            ddlanguage = @sy-langu AND
+                                            as4local   = 'A' AND
+                                            domvalue_l = @gs_input_data-solutionimpl.
+        IF sy-subrc <> 0.
+          DATA(lx_exception) = zcx_qma_exception=>zcx_ti_update_invalid_field.
+          lx_exception-attr1 = 'Solution Implemented'.
+          lx_exception-attr2 = gs_input_data-solutionimpl.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = lx_exception.
+        ENDIF.
+      ENDIF.
+      DATA(lv_solutionid) = CONV crmt_object_id( |{ gs_input_data-solution_id ALPHA = OUT }| ).
+
+      lr_custext->set_property(
+            iv_attr_name = 'ZZSOLUTIONIMPL'
+            iv_value = gs_input_data-solutionimpl ).
+      rv_updated = abap_true.
+    ENDIF.
+
+*--> Solution ID
+    IF gs_input_data-solution_id <> ls_custext-zzsolution_id.
+
+      IF gs_input_data-solution_id IS NOT INITIAL OR ls_custext-zzsolution_id IS NOT INITIAL.
+        SELECT guid , object_id FROM zsearch_indx INTO TABLE @DATA(lt_sol_guid)
+         WHERE object_id = @gs_input_data-solution_id OR object_id = @ls_custext-zzsolution_id
+         AND ( process_type = 'ZPS1' OR process_type = 'ZCS1' ).
+        IF sy-subrc = 0.
+          IF gs_input_data-solution_id IS NOT INITIAL.
+            READ TABLE lt_sol_guid INTO DATA(ls_new_sol) WITH KEY object_id = gs_input_data-solution_id.
+          ENDIF.
+          IF ls_custext-zzsolution_id IS NOT INITIAL.
+            READ TABLE lt_sol_guid INTO DATA(ls_old_sol) WITH KEY object_id = ls_custext-zzsolution_id.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+      IF gs_input_data-solution_id IS NOT INITIAL AND ls_new_sol IS INITIAL.
+        lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+        lx_exception-attr1 = 'Solution ID'.
+        lx_exception-attr2 = gs_input_data-solution_id.
+        RAISE EXCEPTION TYPE zcx_qma_exception
+          EXPORTING
+            textid = lx_exception.
+
+      ENDIF.
+      lr_custext->set_property(
+           iv_attr_name = 'ZZSOLUTION_ID'
+           iv_value = gs_input_data-solution_id ).
+      zcl_tp_techissue=>link_solution( EXPORTING ir_entity = ir_adminh iv_new_object_guid = ls_new_sol-guid iv_old_object_guid = ls_old_sol-guid ). "++
+      rv_updated = abap_true.
+    ENDIF.
+
+*--> Customer Operation Restored
+    IF gs_input_data-cust_opr_rest <> ls_custext-zzcustoperrest.
+      IF gs_input_data-cust_opr_rest IS NOT INITIAL.
+        SELECT SINGLE * FROM dd07t INTO @DATA(ls_dd07t)
+                                     WHERE  domname = 'ZDTEL000024' AND
+                                            ddlanguage = @sy-langu AND
+                                            as4local   = 'A' AND
+                                            domvalue_l = @gs_input_data-cust_opr_rest.
+        IF sy-subrc <> 0.
+          lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+          lx_exception-attr1 = 'Customer Operation Restored'.
+          lx_exception-attr2 = gs_input_data-cust_opr_rest.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = lx_exception.
+        ENDIF.
+      ENDIF.
+      lr_custext->set_property(
+          iv_attr_name = 'ZZCUSTOPERREST'
+          iv_value = gs_input_data-cust_opr_rest ).
+      rv_updated = abap_true.
+    ENDIF.
+
+
+    IF gs_input_data-c_group <> ls_custext-zzcgroup.
+
+      IF gs_input_data-c_group IS NOT INITIAL.
+        CALL METHOD zcl_b_group_controller=>get_cgroup_text
+          EXPORTING
+            iv_product_id  = CONV #( gs_input_data-c_group )
+          IMPORTING
+            ev_description = DATA(lv_cgroupdesc)
+            ev_exist       = DATA(lv_validated).
+
+        IF lv_validated = abap_false.
+          lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+          lx_exception-attr1 = 'C Group'.
+          lx_exception-attr2 = gs_input_data-c_group.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = lx_exception.
+        ENDIF.
+
+      ENDIF.
+
+      lr_custext->set_property(
+         iv_attr_name = 'ZZCGROUP'
+         iv_value = |{ gs_input_data-c_group ALPHA = OUT }| ). 
+*         iv_value = gs_input_data-c_group ). 
+
+      lr_custext->set_property(
+         iv_attr_name = 'ZZCGROUPDESCR'
+         iv_value = lv_cgroupdesc ).
+
+      rv_updated = abap_true.
+
+    ENDIF.
+
+    IF ls_custext-zzaccincflag <> gs_input_data-acc_inc_flag.
+      lr_custext->set_property(
+             iv_attr_name = 'ZZACCINCFLAG'
+             iv_value = gs_input_data-acc_inc_flag ).
+      rv_updated = abap_true.
+    ENDIF.
+
+    DATA(lr_message) = cl_bsp_wd_message_service=>get_instance( ).
+    DATA(lv_rfcdest) = zcl_ir_util=>get_rfc_destination( im_msg_srv  = lr_message ).
+    DATA(lv_salesord) = find_salesord( ir_adminh ).
+
+    IF ls_custext-zzprodorderno <> gs_input_data-prodorderno OR lv_salesord <> gs_input_data-vbeln.
+
+      IF gs_input_data-prodorderno IS NOT INITIAL.
+        lv_prod_order = |{ gs_input_data-prodorderno ALPHA = IN }|.
+
+        CALL FUNCTION '/TPISP/YI_SEARCH_PROD_SALESORD'
+          DESTINATION lv_rfcdest
+          EXPORTING
+            prod_order = lv_prod_order
+          IMPORTING
+            cust_mat   = lt_cust_mat
+          TABLES
+            return     = lt_return.
+
+        IF lt_cust_mat IS INITIAL.
+          lx_exception = zcx_qma_exception=>zcx_prod_order_not_found.
+          lx_exception-attr1 = gs_input_data-prodorderno.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = lx_exception.
+        ENDIF.
+
+        IF gs_input_data-vbeln IS NOT INITIAL.
+          READ TABLE lt_cust_mat INTO DATA(ls_cust_mat) WITH KEY vbeln = gs_input_data-vbeln.
+        ENDIF.
+
+      ELSE.
+        IF ls_adminh-zzissue_det IS INITIAL. 
+          IF lv_salesord IS NOT INITIAL.
+            lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+            lx_exception-attr1 = 'Production order'.
+            lx_exception-attr2 = 'is mandatory'.
+            RAISE EXCEPTION TYPE zcx_qma_exception
+              EXPORTING
+                textid = lx_exception.
+          ELSE.
+            IF gs_input_data-vbeln IS NOT INITIAL.
+              lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+              lx_exception-attr1 = 'Do not use Sales Order'.
+              lx_exception-attr2 = 'Without production order'.
+              RAISE EXCEPTION TYPE zcx_qma_exception
+                EXPORTING
+                  textid = lx_exception.
+            ENDIF.
+          ENDIF. 
+        ENDIF.
+      ENDIF.
+      lr_custext->set_property( iv_attr_name = 'ZZPRODORDERNO' iv_value = gs_input_data-prodorderno ).
+
+      DATA(lr_docflow)     = ir_adminh->get_related_entity( iv_relation_name = 'BTHeaderDocFlowSet' ).
+      IF lr_docflow IS BOUND.
+        DATA(lr_docflow_all) = lr_docflow->get_related_entities( iv_relation_name = 'BTDocFlowAll' ).
+        IF lr_docflow_all IS BOUND.
+          DATA(lr_current) = lr_docflow_all->get_first( ).
+          WHILE lr_current IS BOUND.
+*            IF lr_current->get_property_as_string( 'OBJTYPE_A' ) = zir_object_types-sales_order AND 
+*                lr_current->get_property_as_string( 'OBJKEY_A' ) = lv_salesord.
+            IF lr_current->get_property_as_string( 'OBJTYPE_A' ) = zir_object_types-sales_order OR 
+              lr_current->get_property_as_string( 'OBJTYPE_B' ) = zir_object_types-sales_order.
+              lr_current->delete( ).
+            ENDIF.
+*            IF lr_current->get_property_as_string( 'OBJTYPE_A' ) = zir_object_types-prod_order AND 
+*                lr_current->get_property_as_string( 'OBJKEY_A' ) = ls_custext-zzprodorderno.
+            IF lr_current->get_property_as_string( 'OBJTYPE_A' ) = zir_object_types-prod_order OR 
+              lr_current->get_property_as_string( 'OBJTYPE_B' ) = zir_object_types-prod_order.
+              lr_current->delete( ).
+            ENDIF.
+            lr_current = lr_docflow_all->get_next( ).
+          ENDWHILE.
+        ENDIF.
+      ENDIF.
+
+      CALL FUNCTION 'BAPI_ALM_ORDER_GET_DETAIL'
+        DESTINATION lv_rfcdest
+        EXPORTING
+          number     = gs_input_data-prodorderno
+        IMPORTING
+          es_header  = ls_pheader
+          es_srvdata = ls_psrvdata.
+
+      zcl_ir_util=>docflow_update_r3( EXPORTING im_bus = zir_object_types-prod_order
+                          im_r3id    = gs_input_data-prodorderno
+                          im_date    = ls_pheader-enter_date
+                          iv_rfcdest = lv_rfcdest
+                          iv_entity  = ir_adminh
+                          iv_object_type = zir_object_types-issue ).
+
+      IF gs_input_data-vbeln IS NOT INITIAL.
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING
+            input  = gs_input_data-vbeln
+          IMPORTING
+            output = ls_sales_documents-vbeln.
+
+        APPEND ls_sales_documents TO lt_sales_documents.
+        ls_bapi_view-header = 'X'.
+
+        CALL FUNCTION 'BAPISDORDER_GETDETAILEDLIST'
+          DESTINATION lv_rfcdest
+          EXPORTING
+            i_bapi_view       = ls_bapi_view
+          TABLES
+            sales_documents   = lt_sales_documents
+            order_headers_out = lt_order_headers_out.
+
+        IF lt_order_headers_out IS NOT INITIAL.
+          READ TABLE lt_order_headers_out INTO ls_order_headers_out INDEX 1.
+
+          zcl_ir_util=>docflow_update_r3( EXPORTING im_bus = zir_object_types-sales_order
+                              im_r3id    = CONV #( gs_input_data-vbeln )
+                              im_date    = ls_order_headers_out-doc_date
+                              iv_rfcdest = lv_rfcdest
+                              iv_entity  = ir_adminh
+                              iv_object_type = zir_object_types-issue ).
+        ENDIF.
+      ENDIF.
+
+      lr_custext->set_property( iv_attr_name = 'ZZPRODORDERNO' iv_value = gs_input_data-prodorderno ).
+      lr_custext->set_property( iv_attr_name = 'ZZGLOBALID' iv_value = ls_cust_mat-submi ).
+      lr_custext->set_property( iv_attr_name = 'ZZPRODORDERDATE' iv_value = ls_cust_mat-getri ).
+    ENDIF.
+    IF gs_input_data-reelnumber <> ls_custext-zzreelparcelno.
+      lr_custext->set_property( iv_attr_name = 'ZZREELPARCELNO' iv_value = gs_input_data-reelnumber ).
+    ENDIF.
+
+
+    IF gs_input_data-batch_num <> ls_custext-zzbatchno.
+      lr_custext->set_property( iv_attr_name = 'ZZBATCHNO' iv_value = gs_input_data-batch_num ).
+      rv_updated = abap_true.
+    ENDIF.
+
+    IF gs_input_data-itp_flag <> ls_custext-zzitp_flag.
+      lr_custext->set_property( iv_attr_name = 'ZZITP_FLAG' iv_value = gs_input_data-itp_flag ).
+      rv_updated = abap_true.
+    ENDIF.
+
+    IF gs_input_data-perfaftermain <> ls_custext-zzpamflag.
+      lr_custext->set_property( iv_attr_name = 'ZZPAMFLAG' iv_value = gs_input_data-perfaftermain ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-packedprodcat <> ls_custext-zzpackedprodcut.
+      lr_custext->set_property( iv_attr_name = 'ZZPACKEDPRODCUT' iv_value = gs_input_data-packedprodcat ).
+      rv_updated = abap_true.
+    ENDIF.
+
+    IF gs_input_data-machine_sn <> ls_custext-zzmachinesn.
+      IF gs_input_data-nwa_linked = 'Y'. 
+        RAISE EXCEPTION TYPE zcx_qma_exception 
+          EXPORTING
+            textid = zcx_qma_exception=>zcx_serial_change_blocked.
+      ENDIF.
+      lr_custext->set_property( iv_attr_name = 'ZZMACHINESN' iv_value = gs_input_data-machine_sn ).
+      IF gs_input_data-machine_sn IS NOT INITIAL.
+        
+        DATA(ls_serial_no) = NEW zcl_tp_machine( )->read_serial( iv_serial = gs_input_data-machine_sn ).
+      ENDIF.
+
+      DATA(lr_partnerset)    = ir_adminh->get_related_entity( 'BTHeaderPartnerSet' ).
+      IF lr_partnerset IS BOUND.
+        DATA(lr_customer) = lr_partnerset->get_related_entity( 'BTPartner_00000001_MAIN' ).
+        IF lr_customer IS NOT BOUND.
+          lr_customer = lr_partnerset->create_related_entity( 'BTPartner_00000001_MAIN' ).
+        ENDIF.
+        IF lr_customer IS BOUND.
+          IF ls_serial_no-customer_no IS NOT INITIAL.
+            lr_customer->set_property( iv_attr_name = 'PARTNER_NO' iv_value = ls_serial_no-customer_no ).
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+      ir_adminh->set_property( iv_attr_name = 'ZZWARRENDDATE' iv_value = ls_serial_no-warranty_end ). 
+      ir_adminh->set_property( iv_attr_name = 'ZZVENDORDATE' iv_value = ls_serial_no-vendor_warranty_end ). 
+      lr_custext->set_property( iv_attr_name = 'ZZFLD0000P3' iv_value = ls_serial_no-three_petype ). 
+      lr_custext->set_property( iv_attr_name = 'ZZMACHINE_TYPE' iv_value = ls_serial_no-zzmachine_type ). "machine system
+      lr_custext->set_property( iv_attr_name = 'ZZMACHINETYPE'  iv_value = ls_serial_no-zzmachinetype ). "dev step
+      lr_custext->set_property( iv_attr_name = 'ZZCUSTOMERLINE'    iv_value = ls_serial_no-zzcustomerline ). "customer line id
+      lr_custext->set_property( iv_attr_name = 'ZZFCUSTLINEDESC'    iv_value = ls_serial_no-zzfcustlinedesc )."customer line desc
+      lr_custext->set_property( iv_attr_name = 'ZZMISSION'  iv_value = COND #( WHEN gs_input_data-machine_sn IS NOT INITIAL THEN ls_serial_no-proj_number ELSE '' ) ). 
+      lr_custext->set_property( iv_attr_name = 'ZZPROJMAN'  iv_value = COND #( WHEN gs_input_data-machine_sn IS NOT INITIAL THEN ls_serial_no-projmanager ELSE '' ) ). 
+      lr_custext->set_property( iv_attr_name = 'ZZPMNR'     iv_value = COND #( WHEN gs_input_data-machine_sn IS NOT INITIAL THEN ls_serial_no-projmanager_no ELSE '' ) ). 
+      DATA(lv_runninghours) = ls_serial_no-runhours.
+      CONDENSE lv_runninghours.
+      SHIFT lv_runninghours LEFT DELETING LEADING '0'.
+      lr_custext->set_property( iv_attr_name = 'ZZEQRUNHOURS'    iv_value = lv_runninghours ).
+      ls_custext-zzeqrunhours = lv_runninghours.
+
+      CALL FUNCTION 'ZFM_IR_CONVERSION_ZZMAT_INPUT' 
+        EXPORTING
+          input  = ls_serial_no-material_no
+        IMPORTING
+          output = lv_eq_mat.
+
+      DATA(lr_btbosset) = ir_adminh->get_related_entity( 'BTHeaderBOSSet' ).
+      DATA(lr_btrefobj) = lr_btbosset->get_related_entity( 'BTRefObjSet_A' ).
+      DATA(lr_refobjects) = lr_btrefobj->get_related_entities( iv_relation_name = 'BTRefObjectAll' ).
+      DATA(lr_machine) = ir_adminh->create_related_entity( iv_relation_name = 'ZEXT_BOL_RELAT000001' ).
+
+      IF lr_refobjects IS BOUND AND lr_refobjects->size( ) <> 0.
+        DATA(lr_1entity) = lr_refobjects->get_first( ).
+        WHILE lr_1entity IS BOUND.
+          DATA(lv_product_type) = lr_1entity->get_property_as_string( 'ZMAT_TYPE' ).
+          IF lv_product_type = 'E'.
+            DATA(lr_bteqmatobj_e) = lr_1entity.
+          ELSEIF lv_product_type = 'M'.
+            DATA(lr_bteqmatobj_m) = lr_1entity.
+          ENDIF.
+          lr_1entity = lr_refobjects->get_next( ).
+        ENDWHILE.
+      ENDIF.
+
+      SELECT SINGLE product_guid
+       FROM comm_product
+       INTO @DATA(lv_iobject_guid)
+       WHERE product_id = @ls_serial_no-equipment_id AND object_family = '0401'.
+      IF sy-subrc = 0.
+        DATA(lv_machine_syst) =  zcl_ir_util_trex=>get_machine_system( lv_iobject_guid ).
+      ENDIF.
+
+      IF lr_bteqmatobj_e IS NOT BOUND.
+        lr_bteqmatobj_e = lr_btrefobj->create_related_entity( 'BTRefObjectAll' ).
+        IF lr_bteqmatobj_e IS NOT BOUND.
+          lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+          lx_exception-attr1 = 'could not update serial number'.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = lx_exception.
+        ENDIF.
+        lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'ZMAT_TYPE' iv_value = 'E' ).
+      ENDIF.
+
+      lr_bteqmatobj_e->set_property( iv_attr_name = 'PRODUCT_ID' iv_value = ls_serial_no-equipment_id ).
+      lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'TYPE_OBJECT' iv_value = 'C' ).
+      lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'PRODUCT_GUID' iv_value =  CONV #( lv_iobject_guid ) ).
+
+      IF lr_bteqmatobj_m IS NOT BOUND.
+        lr_bteqmatobj_m = lr_btrefobj->create_related_entity( 'BTRefObjectAll' ).
+        IF lr_bteqmatobj_m IS NOT BOUND.
+          lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+          lx_exception-attr1 = 'could not update serial number'.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = lx_exception.
+        ENDIF.
+        lr_bteqmatobj_m->set_property_as_string( iv_attr_name = 'ZMAT_TYPE' iv_value = 'M' ).
+      ENDIF.
+      lr_bteqmatobj_m->set_property( iv_attr_name = 'PRODUCT_ID' iv_value = lv_eq_mat ).
+
+      SELECT SINGLE short_text INTO @DATA(lv_matdesc)
+       FROM comm_prshtext
+       INNER JOIN comm_product
+        ON comm_product~product_guid = comm_prshtext~product_guid
+       WHERE comm_product~product_id = @ls_serial_no-equipment_id
+         AND comm_prshtext~langu     = @sy-langu.
+
+      lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'ZZMACHINESYSTEM' iv_value = CONV #( lv_matdesc ) ).
+
+      lr_machine->set_property_as_string( iv_attr_name = 'ZZFLD0000DT' iv_value = lv_machine_syst ).
+      lr_machine->set_property_as_string( iv_attr_name = 'ZZFLD0000JB' iv_value = CONV #( lv_eq_mat ) ).
+      lr_machine->set_property( iv_attr_name = 'ZZFLD0000DU' iv_value = lv_matdesc ).
+
+    ENDIF.
+
+    IF gs_input_data-eqrunhours <> ls_custext-zzeqrunhours.
+      IF gs_input_data-eqrunhours IS INITIAL. 
+        IF gs_input_data-eqrunhoursdate IS INITIAL.
+          lr_custext->set_property( iv_attr_name = 'ZZEQRUNHOURS' iv_value = '' ).
+        ELSE.
+          lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+          lx_exception-attr1 = 'Do not specify equipment run date'.
+          lx_exception-attr2 = 'if run hours are not specified'.
+          RAISE EXCEPTION TYPE zcx_qma_exception
+            EXPORTING
+              textid = lx_exception.
+        ENDIF.
+      ELSE.
+        IF gs_input_data-eqrunhoursdate IS NOT INITIAL.
+          lr_custext->set_property( iv_attr_name = 'ZZEQRUNHOURS' iv_value = gs_input_data-eqrunhours ).
+        ELSE.
+          IF gs_input_data-eqrunhours <> '0'. 
+            lx_exception = zcx_qma_exception=>zcx_ti_update_invalid_field.
+            lx_exception-attr1 = 'Specify Eq run hours date'.
+            lx_exception-attr2 = 'if Eq run hours is specified'.
+            RAISE EXCEPTION TYPE zcx_qma_exception
+              EXPORTING
+                textid = lx_exception.
+          ELSE. 
+            lr_custext->set_property( iv_attr_name = 'ZZEQRUNHOURS' iv_value = '' ). 
+          ENDIF. 
+        ENDIF.
+      ENDIF.
+      rv_updated = abap_true.
+    ENDIF.
+
+    SELECT * FROM zcrmv_ddlbs INTO TABLE @DATA(lt_dropdowns). 
+    DATA(lx_exception3) = zcx_qma_exception=>zcx_ti_update_invalid_field. 
+
+    IF gs_input_data-zzlsstrip <> ls_custext-zzlsstrip.
+      IF gs_input_data-zzlsstrip IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'LS_STRIP' value = gs_input_data-zzlsstrip ] ).
+        lx_exception3-attr1 = 'LS Strip Data'.
+        lx_exception3-attr2 = gs_input_data-zzlsstrip. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZLSSTRIP' iv_value = gs_input_data-zzlsstrip ).
+      rv_updated = abap_true.
+    ENDIF.
+
+    IF gs_input_data-score_legal <> ls_custext-zzlegal.
+      IF gs_input_data-score_legal IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_LEGAL' value = gs_input_data-score_legal ] ). 
+        lx_exception3-attr1 = 'Scoring Criteria: Legal'. 
+        lx_exception3-attr2 = gs_input_data-score_legal. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZLEGAL' iv_value = gs_input_data-score_legal ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-score_foodquality <> ls_custext-zzfoodquality.
+      IF gs_input_data-score_foodquality IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_FOODQ' value = gs_input_data-score_foodquality ] ). 
+        lx_exception3-attr1 = 'Scoring Criteria: Food Quality'.
+        lx_exception3-attr2 = gs_input_data-score_foodquality. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZFOODQUALITY' iv_value = gs_input_data-score_foodquality ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-score_packquality <> ls_custext-zzpackquality.
+      IF gs_input_data-score_packquality IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_PACKQ' value = gs_input_data-score_packquality ] ). 
+        lx_exception3-attr1 = 'Scoring Criteria: Package Quality'. 
+        lx_exception3-attr2 = gs_input_data-score_packquality. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZPACKQUALITY' iv_value = gs_input_data-score_packquality ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-score_probcompl <> ls_custext-zzprobcomplaint.
+      IF gs_input_data-score_probcompl IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_PROBC' value = gs_input_data-score_probcompl ] ). 
+        lx_exception3-attr1 = 'Probability of Customer Complaint'. 
+        lx_exception3-attr2 = gs_input_data-score_probcompl. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZPROBCOMPLAINT' iv_value = gs_input_data-score_probcompl ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-score_actualno <> ls_custext-zzimppackactno.
+      lr_custext->set_property( iv_attr_name = 'ZZIMPPACKACTNO' iv_value = gs_input_data-score_actualno ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-score_incrwaste <> ls_custext-zzincrpackwaste.
+      IF gs_input_data-score_incrwaste IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_INCRW' value = gs_input_data-score_incrwaste ] ).
+        lx_exception3-attr1 = 'Increase in Waste'. 
+        lx_exception3-attr2 = gs_input_data-score_incrwaste. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZINCRPACKWASTE' iv_value = gs_input_data-score_incrwaste ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-score_incrcost <> ls_custext-zzincrmaintcost.
+      IF gs_input_data-score_incrcost IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_INCRM' value = gs_input_data-score_incrcost ] ).
+        lx_exception3-attr1 = 'Increase in Cost'. 
+        lx_exception3-attr2 = gs_input_data-score_incrcost. 
+      ENDIF.
+      lr_custext->set_property( iv_attr_name = 'ZZINCRMAINTCOST' iv_value = gs_input_data-score_incrcost ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-mttrepair <> ls_custext-zzmttrepair.
+      IF gs_input_data-mttrepair IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_INCRM' value = gs_input_data-mttrepair ] ). 
+        lx_exception3-attr1 = 'Time to Repair'. 
+        lx_exception3-attr2 = gs_input_data-mttrepair. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZMTTREPAIR' iv_value = gs_input_data-mttrepair ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-mdt <> ls_custext-zzmdt.
+      IF gs_input_data-mdt IS NOT INITIAL AND NOT line_exists( lt_dropdowns[ dropdown = 'SCORE_INCRM' value = gs_input_data-mdt ] ).
+        lx_exception3-attr1 = 'Downtime'. 
+        lx_exception3-attr2 = gs_input_data-mdt. 
+      ENDIF. 
+      lr_custext->set_property( iv_attr_name = 'ZZMDT' iv_value = gs_input_data-mdt ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-software_version <> ls_custext-zzsoftversion.
+      lr_custext->set_property( iv_attr_name = 'ZZSOFTVERSION' iv_value = gs_input_data-software_version ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF COND #( WHEN ls_custext-zzproddown = 1 THEN 'X' ELSE '' ) <> gs_input_data-prod_down.
+      lr_custext->set_property( iv_attr_name = 'ZZPRODDOWN' iv_value = COND #( WHEN gs_input_data-prod_down IS NOT INITIAL THEN '1' ELSE '2' ) ).
+      rv_updated = abap_true.
+    ENDIF.
+    IF gs_input_data-am_globalid <> ls_custext-zzamglobalid. 
+      lr_custext->set_property( iv_attr_name = 'ZZAMGLOBALID' iv_value = gs_input_data-am_globalid ). 
+      rv_updated = abap_true. 
+    ENDIF. 
+    IF lx_exception3-attr1 IS NOT INITIAL.
+      RAISE EXCEPTION TYPE zcx_qma_exception
+        EXPORTING
+          textid = lx_exception3.
+    ENDIF.
+
+    IF gs_input_data-portfolio <> ls_custext-zzportfolio.
+      lr_custext->set_property( iv_attr_name = 'ZZPORTFOLIO' iv_value = gs_input_data-portfolio ).
+      rv_updated = abap_true.
+    ENDIF.
+
+    IF gs_input_data-projectnum <> ls_custext-zzmission.
+      lr_custext->set_property( iv_attr_name = 'ZZMISSION' iv_value = gs_input_data-projectnum ).
+      rv_updated = abap_true.
+    ENDIF.
+
+  ENDMETHOD.
