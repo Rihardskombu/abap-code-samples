@@ -1,0 +1,39 @@
+  METHOD get_part_quant_and_units.
+DESCRIPTION: CiC. New method to get TI part quantity and part quant. units of measure
+*-----------------------------------------------------------------------------------------*
+
+    DATA:
+      lv_claim_qty TYPE crmt_quantity,
+      lv_claim_uom TYPE co_meinh,
+      lr_quant     TYPE REF TO zdtel00001f,
+      lr_uom       TYPE REF TO zdtel00005f,
+      lr_ex        TYPE REF TO cx_root,
+      lv_message   TYPE string,
+      lt_return    TYPE bapiret2_t,
+      ls_return    TYPE bapiret2.
+
+    CHECK ir_customerh IS BOUND.
+
+    TRY.
+        lr_quant ?= ir_customerh->get_property( 'ZZCLAIMQUAN' ).
+        IF lr_quant IS BOUND.
+          lv_claim_qty = lr_quant->*.
+        ENDIF.
+      CATCH cx_root.
+        RETURN.
+    ENDTRY.
+    " Quantity UOM
+    lv_claim_uom = ir_customerh->get_property_as_string( 'ZZCLAIMQUANUM' ).
+
+    IF lv_claim_uom IS NOT INITIAL.
+      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT'
+        EXPORTING
+          input    = lv_claim_uom
+          language = 'E'
+        IMPORTING
+          output   = lv_claim_uom.
+    ENDIF.
+    ev_part_quant = lv_claim_qty.
+    ev_units = lv_claim_uom.
+
+  ENDMETHOD.
