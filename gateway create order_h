@@ -1,0 +1,974 @@
+  METHOD create_ti.
+*   DESCRIPTION: Handle TI creation 
+    INCLUDE z_ir_constants.
+    DATA: lt_data          TYPE zcl_z_qma_mpc=>tt_techissuesubmit,
+          ls_data          TYPE LINE OF zcl_z_qma_mpc=>tt_techissuesubmit,
+          lv_r3ident       TYPE tar3_id,
+          lt_ismand        TYPE TABLE OF zcrmc_ir_ismand,
+          ls_ismand        TYPE zcrmc_ir_ismand,
+          lv_error         TYPE /iwwrk/wf_flag,
+          lr_msg_cont      TYPE REF TO /iwbep/if_message_container,
+          lv_msg_text      TYPE bapi_msg,
+          lv_msg_v1        TYPE symsgv,
+          lv_status        TYPE j_estat,
+          lv_val_fail      TYPE boole_d,
+          lv_timestamp_app TYPE timestamp,
+          lv_timestamp_sys TYPE timestampl,
+          lv_product_id    TYPE zcomt_product_id,
+          lv_part_id       TYPE comt_product_id,
+          lv_ci_guid       TYPE crmt_object_guid,
+          lt_status        TYPE TABLE OF jstat,
+          ls_status        TYPE jstat,
+          lt_ddlb          TYPE bsp_wd_dropdown_table,
+          ls_hier_query    TYPE crmt_erms_cat_hi,
+          lt_hier          TYPE crmt_erms_cat_hi_tab,
+          ls_hier          TYPE LINE OF crmt_erms_cat_hi_tab,
+          ls_dataunlock    TYPE ycrm_qma_perform_operation,
+          lv_arch          TYPE c, 
+          lt_ti_docflow    TYPE crmt_doc_flow_wrkt,
+          lv_ci_id         TYPE crmt_object_id. 
+
+    CONSTANTS lc_urgency_medium TYPE crmt_srqm_urgency VALUE '75'. 
+
+    lr_msg_cont = /iwbep/if_mgw_conv_srv_runtime~get_message_container( ).
+
+    IF is_data_ti IS INITIAL.
+      CALL METHOD io_data_provider->read_entry_data
+        IMPORTING
+          es_data = ls_data.
+      IF sy-subrc IS NOT INITIAL.
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+          EXPORTING
+            textid            = /iwbep/cx_mgw_busi_exception=>business_error_unlimited
+            message_unlimited = 'Error in read_entry_data method in TechIssueSubmitSet of Z_QMA'.
+      ENDIF.
+    ELSE.
+      ls_data = is_data_ti.
+    ENDIF.
+    GET TIME STAMP FIELD lv_timestamp_sys. "++XYYZZZ
+*--> Perform Validations before SAVE as in existing WebUI solution *************
+*--> Customer number can not be empty
+    IF ls_data-customer_no IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Customer number can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Description can not be empty
+    IF ls_data-description IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Description can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Occurence date can not be empty
+*    IF ls_data-occurance_date IS INITIAL. "--XYYZZZ
+    IF ls_data-occurance_date IS INITIAL AND ls_data-occurencedatetime IS INITIAL. "++XYYZZZ
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Occurrence date can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Occurence date should be less than or equal to current date
+*--> Occurrence Date <= Current date
+    IF ls_data-occurance_date > sy-datum.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Occurrence date should be less than'
+          iv_msg_v2      = 'or equal to current date'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ELSE.
+*--> Occurance date and time can not be in future
+*--> Convert occurance date and time to timestamp
+      IF ls_data-occurance_date IS NOT INITIAL. "++XYYZZZ
+        CONVERT DATE ls_data-occurance_date TIME ls_data-occurance_time
+        INTO TIME STAMP lv_timestamp_app TIME ZONE 'UTC'.
+      ELSE. "++XYYZZZ
+        lv_timestamp_app =  ls_data-occurencedatetime. "++XYYZZZ
+      ENDIF. "++XYYZZZ
+*      GET TIME STAMP FIELD lv_timestamp_sys. "--XYYZZZ
+      IF lv_timestamp_app > lv_timestamp_sys.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Occurrence date and time'
+            iv_msg_v2      = 'can not be in future'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+*--> Issue contained should be less than or equal to current date
+*--> Issue Contained Date <= Current date
+*    IF ls_data-contained_date IS NOT INITIAL AND ( ls_data-contained_date > sy-datum ). "--XYYZZZ
+    IF ( ls_data-contained_date IS NOT INITIAL AND ( ls_data-contained_date > sy-datum ) )
+      OR ( ls_data-containeddatetime IS NOT INITIAL AND ( ls_data-containeddatetime > lv_timestamp_sys ) ). "++XYYZZZ
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Issue contained should be less than'
+          iv_msg_v2      = 'or equal to current date'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Issue contained should be greater than or equal to occurance date
+*--> Issue Contained Date >= Occurrence Date
+*    IF ls_data-contained_date IS NOT INITIAL AND ( ls_data-contained_date < ls_data-occurance_date ). "--XYYZZZ
+    IF ( ls_data-contained_date IS NOT INITIAL AND ( ls_data-contained_date < ls_data-occurance_date ) ) OR
+      ( ls_data-containeddatetime IS NOT INITIAL AND ( ls_data-containeddatetime < ls_data-occurencedatetime ) ).
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Issue contained should be greater than'
+          iv_msg_v2      = 'equal to occurrence date'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Problem Description - S001, can not be empty
+    IF ls_data-problem_desc IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Problem Description - S001, '
+          iv_msg_v2      = 'can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> ABC Category is empty
+    IF ls_data-impact IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'ABC Category can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> If Part is entered - Quantity UoM and Part running hours can not be empty
+    IF ls_data-part_id IS NOT INITIAL AND
+     ( ls_data-part_quantity IS INITIAL OR
+       ls_data-part_unit IS INITIAL ).
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Quantity, UoM and '
+          iv_msg_v2      = 'Part running hours can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+    IF ls_data-machine_sn IS NOT INITIAL.
+      TRY.
+          IF is_data_ti-origin NE zir_origin-ors. 
+            DATA(ls_serial) = NEW zcl_tp_machine( )->read_serial( iv_serial = ls_data-machine_sn ).
+          ELSE.
+            DATA(lt_serials) = NEW zcl_tp_machine( )->read_serials( iv_serial = ls_data-machine_sn ).
+
+            IF line_exists( lt_serials[ is_active = abap_true ] ).
+              DELETE lt_serials WHERE is_active = abap_false.
+            ENDIF.
+            IF lines( lt_serials ) > 0.
+              ls_serial = lt_serials[ 1 ].
+            ENDIF.
+            IF lines( lt_serials ) = 1.
+              ls_data-equipment_id = ls_serial-equipment_id.
+            ENDIF.
+          ENDIF.
+        CATCH zcx_qma_exception INTO DATA(lx_exception).
+          convert_exception( io_exception = lx_exception iv_fieldname = 'MachineSn' ).
+      ENDTRY.
+
+    ENDIF.
+
+    IF ls_data-origin = zir_origin-ors.
+      ls_data-urgency = COND #( WHEN ls_data-urgency IS INITIAL THEN lc_urgency_medium ELSE ls_data-urgency ).
+
+      IF ls_data-equipment_run_hrs IS NOT INITIAL.
+        SHIFT ls_data-equipment_run_hrs LEFT DELETING LEADING '0'.
+      ENDIF.
+
+
+    ENDIF.
+
+*--> Production Down can not be empty
+    IF ls_data-prod_down IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Production down can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Responsible group can not be empty
+    IF ls_data-resp_group_no IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Responsible group can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Portfolio can not be empty
+*    IF ls_data-portfolio IS INITIAL.
+*    IF ls_data-portfolio IS INITIAL AND is_capture IS INITIAL. 
+    IF ls_data-portfolio IS INITIAL AND is_capture-issue_detected IS INITIAL. 
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Portfolio can not be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Check if Part ID is valid
+    IF ls_data-part_id IS NOT INITIAL.
+      CALL FUNCTION 'CONVERSION_EXIT_ZZMAT_INPUT'
+        EXPORTING
+          input  = ls_data-part_id
+        IMPORTING
+          output = lv_part_id.
+
+      SELECT SINGLE product_id INTO lv_product_id FROM comm_product  WHERE product_id = lv_part_id.
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+*           iv_msg_v1      = 'Part number' 
+*           iv_msg_v2      = ls_data-part_id 
+            iv_msg_v1      = COND #( WHEN ls_data-origin = '15' THEN 'PartId: Part number' ELSE 'Part number' ) 
+            iv_msg_v2      = |{ ls_data-part_id ALPHA = OUT }| 
+            iv_msg_v3      = 'is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+*--> Check if Serial Number is valid
+    IF ls_data-machine_sn IS NOT INITIAL.
+      SELECT SINGLE r3ident INTO lv_r3ident FROM com_ta_r3_id WHERE r3ser_no = ls_data-machine_sn.
+      IF sy-subrc <> 0.
+        FIND FIRST OCCURRENCE OF REGEX '[a-zA-Z]' IN ls_data-machine_sn.
+        IF sy-subrc <> 0.
+*--> Add leading zeros
+          CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+            EXPORTING
+              input  = ls_data-machine_sn
+            IMPORTING
+              output = ls_data-machine_sn.
+
+          SELECT SINGLE r3ident INTO lv_r3ident FROM com_ta_r3_id WHERE r3ser_no = ls_data-machine_sn.
+          IF sy-subrc <> 0.
+            lv_val_fail = abap_true.
+            CALL METHOD me->raise_validation
+              EXPORTING
+                iv_msg_v1      = 'Serial number '
+                iv_msg_v2      = ls_data-machine_sn
+                iv_msg_v3      = 'is invalid'
+                iv_entity_name = iv_entity_name
+                er_msg_cont    = lr_msg_cont.
+          ENDIF.
+        ELSE.
+          lv_val_fail = abap_true.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = 'Serial number '
+              iv_msg_v2      = ls_data-machine_sn
+              iv_msg_v3      = 'is invalid'
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*--> Validate if Consolidated Issue (CI) received from App is valid
+    IF ls_data-ci_id IS NOT INITIAL.
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = ls_data-ci_id
+        IMPORTING
+          output = ls_data-ci_id.
+
+*      SELECT SINGLE guid description FROM crmd_orderadm_h INTO ( lv_ci_guid , ls_data-ci_desc ) WHERE object_id = ls_data-ci_id AND "--XYYZZZ
+*                                                                    process_type = 'ZKI1'. 
+      SELECT SINGLE guid zzarch FROM crmd_orderadm_h INTO ( lv_ci_guid  , lv_arch ) WHERE object_id = ls_data-ci_id AND "++XYYZZZ
+                                                                    process_type = 'ZKI1'.  
+
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = ls_data-ci_id
+            iv_msg_v2      = 'Consolidated Issue is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ELSE.
+
+*--> Get the status of CI
+        CALL FUNCTION 'CRM_STATUS_READ'
+          EXPORTING
+            objnr            = lv_ci_guid
+            only_active      = 'X'
+          TABLES
+            status           = lt_status
+          EXCEPTIONS
+            object_not_found = 1
+            OTHERS           = 2.
+        IF sy-subrc = 0.
+*--> Check the status of CI
+          LOOP AT lt_status INTO ls_status WHERE
+            stat = zir_status_techn-ki_canceled OR
+            stat = zir_status_techn-ki_merged.
+*--> Since CI is cancelled (or) merged
+*--> Set validation failed flag and add error message
+            lv_val_fail = abap_true.
+            lr_msg_cont = /iwbep/if_mgw_conv_srv_runtime~get_message_container( ).
+            lv_msg_v1 = ls_data-ci_id.
+            MESSAGE e009(ztp_qma_messages) WITH lv_msg_v1 INTO lv_msg_text.
+            CALL METHOD lr_msg_cont->add_message
+              EXPORTING
+                iv_msg_type           = 'E'
+                iv_msg_id             = 'ZTP_QMA_MESSAGES'
+                iv_msg_number         = '009'
+                iv_msg_text           = lv_msg_text
+                iv_msg_v1             = lv_msg_v1
+                iv_is_leading_message = abap_true
+                iv_entity_type        = iv_entity_name.
+          ENDLOOP.
+        ENDIF.
+        IF lv_arch IS NOT INITIAL. 
+          raise_exception( 'Linking archived CI (' && is_data_ti-ci_id && ') is not allowed' ). 
+        ENDIF. 
+      ENDIF.
+    ENDIF.
+
+*--> Check Z*MAND* table validations
+*--> If issue conatined flag is initial set status for check to 'Inprocess' else 'Contained'
+    IF ls_data-issue_contained IS INITIAL.
+      lv_status = 'E0005'.
+    ELSE.
+      lv_status = 'E0008'.
+    ENDIF.
+
+*--> Get Mandatory fields for Contained or Inprocess status based on Issue contained flag
+    SELECT * FROM zcrmc_ir_ismand INTO TABLE lt_ismand WHERE process_type  = 'ZIS1' AND
+                                                             issue_type    = 'CA_23' AND
+                                                             estat =  lv_status  AND
+                                                             is_mandatory  = abap_true.
+    IF sy-subrc = 0.
+
+*--> Customer operation restored can not be empty for contained TI
+      READ TABLE lt_ismand TRANSPORTING NO FIELDS WITH KEY fieldname = 'ZZCUSTOPERREST'.
+      IF sy-subrc = 0.
+        IF ls_data-custoperrest IS INITIAL.
+
+          lv_val_fail = abap_true.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = 'Customer operation restored can not be empty'
+              iv_msg_v2      = 'for contained Technical Issue'
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+
+        ENDIF.
+      ENDIF.
+
+*--> Customer operation date(Containment date) can not be empty for contained TI
+      READ TABLE lt_ismand TRANSPORTING NO FIELDS WITH KEY fieldname = 'ZOP_RESTORED'.
+      IF sy-subrc = 0.
+*        IF ls_data-contained_date IS INITIAL. "--XYYZZZ
+        IF ls_data-contained_date IS INITIAL AND ls_data-containeddatetime IS INITIAL. "++XYYZZZ
+
+          lv_val_fail = abap_true.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = 'Contained date can not be empty'
+              iv_msg_v2      = 'for contained Technical Issue'
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+
+        ENDIF.
+      ENDIF.
+
+*--> Solution Implemented can not be empty for contained TI
+      READ TABLE lt_ismand TRANSPORTING NO FIELDS WITH KEY fieldname = 'ZZSOLUTIONIMPL'.
+      IF sy-subrc = 0.
+        IF ls_data-sol_impl IS INITIAL.
+          lv_val_fail = abap_true.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = 'Solution Implemented can not be empty'
+              iv_msg_v2      = 'for contained Technical Issue'
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF check_ti_authorisation( ) = abap_false.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = sy-uname
+          iv_msg_v2      = 'has no authorization to create Technical Issue'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+*--> Check ABC category is valid
+    IF ls_data-impact IS NOT INITIAL.
+*--> Get list of impacts and their descriptions
+      CALL METHOD cl_crm_uiu_cust_get=>get_values_for_field
+        EXPORTING
+          iv_fieldname = 'IMPACT'
+        RECEIVING
+          rt_value     = lt_ddlb
+        EXCEPTIONS
+          OTHERS       = 4.
+*--> Filter ABC categories as done in WebUI
+      lt_ddlb = zcl_ir_util=>filter_abc_ddlb_values( lt_ddlb ).
+
+*--> Check ABC category received form App is still valid
+      READ TABLE lt_ddlb TRANSPORTING NO FIELDS WITH KEY key = ls_data-impact.
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'ABC category'
+            iv_msg_v2      = ls_data-impact
+            iv_msg_v3      = 'is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+*--> Check Customer operation restored is valid
+    IF ls_data-custoperrest IS NOT INITIAL.
+      SELECT SINGLE * FROM dd07t INTO @DATA(ls_dd07t)
+                                   WHERE  domname = 'ZDTEL000024' AND
+                                          ddlanguage = @sy-langu AND
+                                          as4local   = 'A' AND
+                                          domvalue_l = @ls_data-custoperrest.
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Customer Operation Restored'
+            iv_msg_v2      = ls_data-custoperrest
+            iv_msg_v3      = 'is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+
+    IF ls_data-ft_guid IS NOT INITIAL.
+      IF is_capture-issue_detected IS NOT INITIAL.
+        IF is_capture-issue_detected = '01'.
+          IF is_capture-issue_object = '01'.
+            DATA(lv_listtype) = CONV string( 'AM Deviation/Deviation Category' ). "
+          ELSEIF is_capture-issue_object = '02'.. 
+            lv_listtype = CONV string( 'PM Deviation/Deviation Category' ). 
+          ELSEIF is_capture-issue_object = '03'.
+            lv_listtype = CONV string( 'Parts Deviation/Failure/Category' ). 
+          ENDIF.
+        ELSE.
+          lv_listtype = CONV string( 'Failure List Category/Deviation' ). 
+        ENDIF.
+      ENDIF.
+
+      CONCATENATE sy-datum sy-uzeit INTO DATA(lv_current_time).
+      IF is_capture-issue_detected IS INITIAL. 
+        SELECT SINGLE * FROM crmc_erms_cat_as INTO @DATA(ls_crmc_erms_cat_as)
+                                              WHERE asp_id    EQ 'TP_IR_ISSUE_CATS' AND
+                                                  ( asp_state = 'R' OR asp_state = 'V' ) AND
+                                                    val_from  LE @lv_current_time AND
+                                                    val_to    GE @lv_current_time.
+      ELSE. 
+        SELECT SINGLE * FROM crmc_erms_cat_as INTO @ls_crmc_erms_cat_as 
+                                          WHERE asp_id  = 'TP_IR_ISSUE_CATS_FL' AND
+                                              ( asp_state = 'R' OR asp_state = 'V' ) AND
+                                                val_from  LE @lv_current_time AND
+                                                val_to    GE @lv_current_time.
+      ENDIF. 
+
+      IF ls_crmc_erms_cat_as IS NOT INITIAL.
+*--> Check Failure type is valid
+        IF ls_data-ft_guid IS NOT INITIAL.
+          ls_hier_query-tree_guid = ls_crmc_erms_cat_as-asp_guid.
+          ls_hier_query-tree_type = 'CAT'.
+          ls_hier_query-node_guid = ls_data-ft_guid.
+          CALL FUNCTION 'CRM_ERMS_CAT_HI_READ'
+            EXPORTING
+              iv_hier_query = ls_hier_query
+            IMPORTING
+              et_hier       = lt_hier.
+
+          IF lt_hier[] IS INITIAL.
+            lv_val_fail = abap_true.
+            CALL METHOD me->raise_validation
+              EXPORTING
+                iv_msg_v1      = COND #( WHEN lv_listtype IS INITIAL THEN 'Failure Type' ELSE lv_listtype )
+                iv_msg_v2      = ls_data-ft_guid
+                iv_msg_v3      = 'is invalid'
+                iv_entity_name = iv_entity_name
+                er_msg_cont    = lr_msg_cont.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+*--> Check Portfolio is valid
+    IF ls_data-portfolio IS NOT INITIAL.
+      SELECT SINGLE * FROM dd07t INTO @DATA(ls_dd07t_p)
+                                   WHERE  domname = 'ZDTEL0000TZ' AND
+                                          ddlanguage = @sy-langu AND
+                                          as4local   = 'A' AND
+                                          domvalue_l = @ls_data-portfolio.
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Portfolio'
+            iv_msg_v2      = ls_data-portfolio
+            iv_msg_v3      = 'is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+*--> Check Solution implemented is valid
+    IF ls_data-sol_impl IS NOT INITIAL.
+      SELECT SINGLE * FROM dd07t INTO @DATA(ls_dd07t_s)
+                                   WHERE  domname = 'ZDTEL000022' AND
+                                          ddlanguage = @sy-langu AND
+                                          as4local   = 'A' AND
+                                          domvalue_l = @ls_data-sol_impl.
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Solution Implemented'
+            iv_msg_v2      = ls_data-sol_impl
+            iv_msg_v3      = 'is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+*--> Check Urgency List is valid
+    IF ls_data-urgency IS NOT INITIAL.
+      SELECT SINGLE * FROM crmc_srqm_urgenc INTO @DATA(ls_urgenc)
+                                            WHERE urgency = @ls_data-urgency.
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Urgency'
+            iv_msg_v2      = ls_data-urgency
+            iv_msg_v3      = 'is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+*--> Check Part Unit of Measure is valid
+    IF ls_data-part_unit IS NOT INITIAL.
+      SELECT SINGLE a~msehi INTO @DATA(ls_ir_uom)
+        FROM zcrmc_ir_uom AS a INNER JOIN t006a AS b
+                  ON a~msehi = b~msehi
+               WHERE b~mseh3 = @ls_data-part_unit.
+      IF sy-subrc <> 0.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Part Unit of Measure'
+            iv_msg_v2      = ls_data-part_unit
+            iv_msg_v3      = 'is invalid'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+    IF ls_data-issue_doc_ver_no IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Issue Doc Verifier cannot be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+    IF ls_data-cust_resp_no_1 IS INITIAL.
+      lv_val_fail = abap_true.
+      CALL METHOD me->raise_validation
+        EXPORTING
+          iv_msg_v1      = 'Customer Responsible cannot be empty'
+          iv_entity_name = iv_entity_name
+          er_msg_cont    = lr_msg_cont.
+    ENDIF.
+
+    DATA(ls_pminfo) = is_data_ecc. 
+
+    CASE ls_data-area.
+      WHEN 'PackMat'.
+        IF is_data_ecc-prodorderno IS INITIAL.
+          lv_val_fail = abap_true.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = 'Production order number'
+              iv_msg_v2      = 'is mandatory for PackMat TI'
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+        ELSE.
+          IF is_data_ecc IS INITIAL.
+            TRY.
+                DATA(lt_pminfo) = zcl_tp_techissue=>ecc_salesord_info( ls_data-prodorderno ).
+                READ TABLE lt_pminfo WITH
+                KEY material = ls_data-productid
+                    customer = ls_data-customer_no
+                    vbeln = ls_data-sales_ord
+                    lifnr = ls_data-manufact_site
+                INTO ls_pminfo. 
+*                INTO DATA(ls_pminfo). 
+                IF sy-subrc <> 0.
+                  IF ls_data-productid IS NOT INITIAL.
+                    SELECT COUNT(*) FROM comm_product AS prod
+                      INNER JOIN comm_prprdcatr AS cat
+                      ON cat~product_guid = prod~product_guid
+                      WHERE product_id = @ls_data-productid
+                      AND cat~category_id = 'MAT_CDES'
+                      INTO @DATA(lv_count).
+
+                    IF lv_count = 0.
+                      lv_val_fail = abap_true.
+                      CALL METHOD me->raise_validation
+                        EXPORTING
+                          iv_msg_v1      = 'Material invalid for PackMat'
+                          iv_msg_v2      = ls_data-productid
+                          iv_entity_name = iv_entity_name
+                          er_msg_cont    = lr_msg_cont.
+                    ENDIF.
+                    ls_pminfo-material = ls_data-productid.
+                  ENDIF.
+                ENDIF.
+                ls_data-area = zir_category-packmat.
+              CATCH zcx_qma_exception .
+            ENDTRY.
+          ELSE.
+            ls_pminfo = is_data_ecc.
+            ls_data-area = zir_category-packmat.
+          ENDIF.
+          IF ls_pminfo IS INITIAL.
+            lv_val_fail = abap_true.
+            CALL METHOD me->raise_validation
+              EXPORTING
+                iv_msg_v1      = 'Production order number invalid'
+                iv_msg_v2      = ls_data-prodorderno
+                iv_entity_name = iv_entity_name
+                er_msg_cont    = lr_msg_cont.
+          ENDIF.
+        ENDIF.
+
+      WHEN 'AddMat'. 
+        ls_data-area = zir_category-addmat. 
+        ls_pminfo = is_data_ecc. 
+
+      WHEN 'Equipment + Spare Parts' OR ''.
+        ls_data-area = zir_category-equipment.
+
+      WHEN 'Service Delivery'. 
+        ls_data-area = zir_category-service. 
+
+
+      WHEN 'Automation and Digital Products' OR 'Automation and Digital products'.
+        ls_data-area = zir_category-in_plant_autom.
+        IF ls_data-software_version IS INITIAL.
+          lv_val_fail = abap_true.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = 'Software version'
+              iv_msg_v2      = 'is mandatory for Automation TI'
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+        ENDIF.
+
+      WHEN 'Packages'. 
+        ls_data-area = zir_category-packages. 
+
+      WHEN OTHERS.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Area Not supported'
+            iv_msg_v2      = ls_data-area
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+    ENDCASE.
+
+    IF is_data_ti-origin EQ zir_origin-ors.
+      IF is_data_ti-solution_id IS NOT INITIAL.
+        SELECT SINGLE guid FROM zsearch_indx INTO @DATA(lv_sol_guid)
+          WHERE object_id = @is_data_ti-solution_id AND ( ( process_type = @zir_proctype-permanent_sol AND status NOT IN
+                  ( @zir_status_techn-ps_replaced , @zir_status_techn-ps_cancelled , @zir_status_techn-ps_outdated ) ) OR
+                ( process_type = @zir_proctype-containm_sol AND status NOT IN
+                  ( @zir_status_techn-cs_rejected , @zir_status_techn-cs_cancelled , @zir_status_techn-cs_expired ) ) ).
+        IF sy-subrc <> 0.
+          lv_val_fail = abap_true.
+          DATA(lv_solid) = |{ is_data_ti-solution_id ALPHA = OUT }|.
+          CONDENSE lv_solid.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = |SolutionId: Solution Id | && lv_solid && | is invalid|
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+        ENDIF.
+      ELSE.
+        IF is_data_ti-sol_impl = zir_sol_impl-existing_sol.
+          lv_val_fail = abap_true.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = 'Solution Id is mandatory'
+              iv_msg_v2      = 'when solution implemented is'
+              iv_msg_v3      = 'Existing CS/PS'
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    IF NOT is_data_ti-origin EQ zir_origin-ors.
+      IF is_capture-issue_detected = zir_issue_det-during_prod AND is_capture-issue_seen = zir_issue_seen-packaging.
+        IF is_data_ti-machine_sn IS INITIAL.
+          DATA(lx_exception2) = zcx_qma_exception=>zcx_serial_mandatory.
+        ELSEIF is_data_ti-customer_no IS INITIAL.
+          lx_exception2 = zcx_qma_exception=>zcx_customer_mandatory.
+        ELSEIF is_data_ti-equipment_run_hrs IS INITIAL.
+          lx_exception2 = zcx_qma_exception=>zcx_eq_runhrs_mandatory.
+        ENDIF.
+      ELSEIF is_capture-issue_detected = zir_issue_det-before_prod AND is_capture-issue_object = zir_issue_obj-parts.
+        IF is_data_ti-part_id IS INITIAL.
+          lx_exception2 = zcx_qma_exception=>zcx_part_id_mandatory.
+        ENDIF.
+        IF is_data_ti-customer_no IS INITIAL.
+          lx_exception2 = zcx_qma_exception=>zcx_customer_mandatory.
+        ENDIF.
+      ENDIF.
+      IF is_capture-issue_detected IS NOT INITIAL.
+        IF is_data_ti-part_id IS NOT INITIAL.
+          CALL METHOD me->partsset_get_entityset
+            EXPORTING
+              iv_entity_name           = ''
+              iv_entity_set_name       = ''
+              iv_source_name           = ''
+              it_filter_select_options = VALUE #( ( property = 'ProductId' select_options = VALUE #( ( low = is_data_ti-part_id option = 'EQ' sign = 'I' ) ) ) )
+              is_paging                = VALUE #( )
+              it_key_tab               = VALUE #( )
+              it_navigation_path       = VALUE #( )
+              it_order                 = VALUE #( )
+              iv_filter_string         = ''
+              iv_search_string         = ''.
+        ENDIF.
+      ENDIF.
+      IF lx_exception2 IS NOT INITIAL.
+        IF lr_msg_cont IS BOUND.
+          lr_msg_cont->reset( ).
+        ENDIF.
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+          EXPORTING
+            textid = lx_exception2.
+      ENDIF.
+    ENDIF.
+
+    IF is_data_ti-origin EQ '90' OR is_data_ti-origin IS INITIAL.
+      IF is_capture-issue_detected IS INITIAL.
+        IF ls_data-area = zir_category-addmat OR ls_data-area = zir_category-packmat.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v1      = |You need to upgrade to app version|
+              iv_msg_v2      = |to be able to create|
+              iv_msg_v3      = COND #( WHEN ls_data-area = zir_category-addmat THEN 'Additional Material' ELSE 'Packaging Material' )
+              iv_msg_v4      = |TI|
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+          lv_val_fail = abap_true.
+        ELSEIF ls_data-area = zir_category-service.
+          CALL METHOD me->raise_validation
+            EXPORTING
+              iv_msg_v3      = |app version|
+              iv_msg_v1      = |You can no longer create a TI in|
+              iv_msg_v2      = |Service Delivery area. You need to upgrade|
+              iv_entity_name = iv_entity_name
+              er_msg_cont    = lr_msg_cont.
+          lv_val_fail = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    CALL METHOD me->custauthcheckset_get_entity
+      EXPORTING
+        iv_entity_name     = ''
+        iv_entity_set_name = ''
+        iv_source_name     = ''
+        it_key_tab         = VALUE /iwbep/t_mgw_name_value_pair( ( name = 'CustomerNo' value = ls_data-customer_no ) )
+        it_navigation_path = VALUE /iwbep/t_mgw_navigation_path( ( ) ).
+
+    IF is_capture-mmi_deviation = '1' OR is_capture-mmi_deviation = '3'.
+      IF is_capture-cat_guid IS INITIAL.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Package Deviation'
+            iv_msg_v2      = 'is mandatory when MMI or'
+            iv_msg_v3      = 'Package deviation is answered as Yes'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+    IF is_capture-mmi_deviation = '1'.
+      IF is_data_ecc-prodorderno IS INITIAL.
+        lv_val_fail = abap_true.
+        CALL METHOD me->raise_validation
+          EXPORTING
+            iv_msg_v1      = 'Production Order number'
+            iv_msg_v2      = 'is mandatory when MMI or'
+            iv_msg_v3      = 'Package deviation is answered as Yes)'
+            iv_entity_name = iv_entity_name
+            er_msg_cont    = lr_msg_cont.
+      ENDIF.
+    ENDIF.
+
+
+*--> If any of validations fail then raise exception and abort creation
+    IF lv_val_fail IS NOT INITIAL.
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          message_container = lr_msg_cont.
+    ENDIF.
+
+    IF ls_data-alarm_code IS NOT INITIAL AND ( NOT ( ls_data-issue_detected = '02' AND ls_data-issue_seen = '02' ) ) AND match( val = ls_data-alarm_code regex = '^[0-9]{9}$') = ''. 
+      MESSAGE e050(ztp_qma_messages) INTO lv_msg_text.
+      CALL METHOD lr_msg_cont->add_message
+        EXPORTING
+          iv_msg_type           = 'E'
+          iv_msg_id             = 'ZTP_QMA_MESSAGES'
+          iv_msg_number         = '050'
+          iv_msg_text           = lv_msg_text
+          iv_msg_v1             = lv_msg_v1
+          iv_is_leading_message = abap_true
+          iv_entity_type        = iv_entity_name.
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          message_container = lr_msg_cont.
+    ENDIF.
+
+    IF is_data_ti-source_query IS NOT INITIAL.
+      SELECT SINGLE guid FROM zsearch_indx INTO @DATA(lv_qry_guid)
+        WHERE
+        object_id = @is_data_ti-source_query AND
+        process_type = @zir_proctype-query
+        AND status = @zir_status_techn-qu_suggest_ti.
+    ENDIF.
+
+
+    IF is_capture-issue_object = '01'.
+      IF ls_data-part_id IS NOT INITIAL AND ls_pminfo-material IS INITIAL.
+        ls_pminfo-material = ls_data-part_id.
+      ENDIF.
+    ELSEIF is_capture-issue_object = '02'.
+      IF ls_data-part_id IS NOT INITIAL AND ls_pminfo-material IS INITIAL.
+        ls_pminfo-material = ls_data-part_id.
+      ENDIF.
+    ENDIF.
+
+    IF ls_data-c_group IS NOT INITIAL. 
+      SHIFT ls_data-c_group LEFT DELETING LEADING '0'.
+    ENDIF. 
+
+*--> Create Technical Issue with received data from App after performing input validations
+    CALL FUNCTION 'YCRM_TI_CREATE'
+      EXPORTING
+        is_ti_submit    = ls_data
+        iv_ci_guid      = lv_ci_guid
+        iv_query_guid   = lv_qry_guid 
+        is_pm_info      = ls_pminfo
+        it_partners     = it_partners 
+        is_capture      = is_capture 
+        it_texts        = it_texts 
+        is_serial       = ls_serial
+      IMPORTING
+        ev_object_id    = ls_data-object_id
+        ev_issue_driver = ls_data-issue_driver_no
+        ev_ci_id        = lv_ci_id 
+        ev_error        = lv_error.
+
+*--> Send the created TI number through the Entity structure
+    IF  lv_error IS INITIAL.
+      es_entity = validate_ti( is_ti = ls_data is_pminfo = ls_pminfo is_capture = is_capture ). 
+      MOVE-CORRESPONDING ls_data TO es_entity.
+      IF lv_ci_id IS NOT INITIAL.
+        es_entity-ci_id = lv_ci_id.
+      ENDIF.
+      TRY.
+          ls_dataunlock-object_id = ls_data-object_id.
+          ls_dataunlock-operation = 'UnLock'.
+          NEW zcl_tp_techissue( )->perform_operation( ls_dataunlock ).
+        CATCH cx_root.
+      ENDTRY.
+    ELSE.
+*--> Error while creating Technical Opportunity
+      lv_msg_v1 = ls_data-object_id.
+      MESSAGE e010(ztp_qma_messages) WITH lv_msg_v1 INTO lv_msg_text.
+      CALL METHOD lr_msg_cont->add_message
+        EXPORTING
+          iv_msg_type           = 'E'
+          iv_msg_id             = 'ZTP_QMA_MESSAGES'
+          iv_msg_number         = '010'
+          iv_msg_text           = lv_msg_text
+          iv_msg_v1             = lv_msg_v1
+          iv_is_leading_message = abap_true
+          iv_entity_type        = iv_entity_name.
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          message_container = lr_msg_cont.
+    ENDIF.
+
+
+    CLEAR es_entity-source_query.
+    IF ls_data-object_id IS NOT INITIAL.
+      IF lv_qry_guid IS NOT INITIAL.
+        SELECT SINGLE guid FROM crmd_orderadm_h INTO @DATA(lv_ti_guid) WHERE process_type = @zir_proctype-issue AND object_id = @ls_data-object_id.
+        IF lv_ti_guid IS NOT INITIAL.
+          CALL FUNCTION 'CRM_DOC_FLOW_READ_OB'
+            EXPORTING
+              iv_header_guid  = lv_ti_guid
+            IMPORTING
+              et_doc_flow_wrk = lt_ti_docflow.
+          READ TABLE lt_ti_docflow INTO DATA(ls_docflow) WITH KEY objkey_b = lv_qry_guid.
+          IF sy-subrc <> 0.
+            DELETE lt_ti_docflow WHERE objkey_a = lv_qry_guid.
+            READ TABLE lt_ti_docflow INTO ls_docflow WITH KEY objkey_a = lv_qry_guid.
+          ENDIF.
+          IF ls_docflow IS NOT INITIAL.
+            es_entity-source_query = ls_data-source_query.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+
+  ENDMETHOD.
