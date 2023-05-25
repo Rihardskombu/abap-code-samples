@@ -1,0 +1,197 @@
+REPORT zrep_refresh_ors_ti_machinesn.
+*   DESCRIPTION: Fix ORS TIs with serial but no equipment
+*                1. choose only those TIs which are ORS origin + with serial + no equipment
+*                For every TI/serial
+*                2. read linked equipments and choose active equipment
+*                3. read that equipment details (machine type, dev step etc)
+*                4. Add those details into the TI
+**------------------------------------------------------------------------*
+
+INCLUDE ztp_ir_constants.
+
+DATA: lv_product_id TYPE comt_product_id,
+      lv_object_id  TYPE crmt_object_id,
+      lv_eq_mat     TYPE comt_product_id.
+
+SELECTION-SCREEN BEGIN OF BLOCK selection WITH FRAME TITLE TEXT-002.
+
+SELECTION-SCREEN BEGIN OF LINE.
+SELECTION-SCREEN COMMENT (30) TEXT-016 FOR FIELD s_object.
+SELECT-OPTIONS : s_object FOR lv_object_id NO INTERVALS.
+SELECTION-SCREEN END OF LINE.
+PARAMETERS:     p_test    TYPE flag DEFAULT 'X'.
+SELECTION-SCREEN END OF BLOCK selection.
+
+INITIALIZATION.
+*Authoriztion check.
+  AUTHORITY-CHECK OBJECT 'S_PROGRAM'
+              ID 'P_GROUP'  FIELD 'YSDT'
+              ID 'P_ACTION' FIELD 'SUBMIT'.
+  IF sy-subrc NE 0.
+    MESSAGE e541(rsm1) WITH sy-repid.
+    RETURN.
+  ENDIF.
+
+* Start of Selection--------------------------------------------------*
+START-OF-SELECTION.
+
+  SELECT guid, object_id, zzmachinesn, eq_equipment_no FROM zsearch_indx INTO TABLE @DATA(lt_ors_tis)
+    WHERE zzfld00007r = 'Remote Support' AND zzmachinesn <> '' AND ##NO_TEXT
+          object_id IN @s_object AND
+          process_type = 'ZIS1'.
+
+  WRITE: / TEXT-005 && | | && COND string( WHEN p_test IS INITIAL THEN TEXT-003 ELSE TEXT-004 ).
+
+  SELECT *  FROM ztp_ir_equip
+    INTO TABLE @DATA(lt_equipments)
+    FOR ALL ENTRIES IN @lt_ors_tis
+     WHERE r3ser_no = @lt_ors_tis-zzmachinesn.
+
+  LOOP AT lt_ors_tis INTO DATA(ls_ors_ti).
+
+    IF ls_ors_ti-eq_equipment_no IS INITIAL AND ls_ors_ti-zzmachinesn IS NOT INITIAL.
+
+      DATA(lt_serials) = NEW zcl_tp_machine( )->read_serials( iv_serial = ls_ors_ti-zzmachinesn ).
+
+      IF line_exists( lt_serials[ is_active = abap_true ] ).
+        DELETE lt_serials WHERE is_active = abap_false.
+      ENDIF.
+      IF lines( lt_serials ) > 0.
+        DATA(ls_serial_no) = lt_serials[ 1 ].
+      ENDIF.
+
+      IF ls_serial_no-equipment_id IS NOT INITIAL.
+
+        TRY.
+*--> Get root object
+            DATA(lr_core) = cl_crm_bol_core=>get_instance( ).
+            lr_core->load_component_set('BT').
+            lr_core->load_component_set('ONEORDER').
+            DATA(lr_adminh) = lr_core->get_root_entity(
+                    iv_object_name = 'BTAdminH'
+                    iv_object_guid = ls_ors_ti-guid ).
+            IF lr_adminh IS BOUND.
+
+              DATA(lr_custext) = lr_adminh->get_related_entity('BTHeaderCustExt').
+              IF lr_custext IS BOUND.
+
+                lr_adminh->set_property( iv_attr_name = 'ZZWARRENDDATE' iv_value = ls_serial_no-warranty_end ).
+                lr_adminh->set_property( iv_attr_name = 'ZZVENDORDATE' iv_value = ls_serial_no-vendor_warranty_end ).
+                lr_custext->set_property( iv_attr_name = 'ZZFLD0000P3' iv_value = ls_serial_no-three_petype ).
+                lr_custext->set_property( iv_attr_name = 'ZZMACHINE_TYPE' iv_value = ls_serial_no-zzmachine_type ). "machine system
+                lr_custext->set_property( iv_attr_name = 'ZZMACHINETYPE'  iv_value = ls_serial_no-zzmachinetype ). "dev step
+                lr_custext->set_property( iv_attr_name = 'ZZCUSTOMERLINE'    iv_value = ls_serial_no-zzcustomerline ). "customer line id
+                lr_custext->set_property( iv_attr_name = 'ZZFCUSTLINEDESC'    iv_value = ls_serial_no-zzfcustlinedesc )."customer line desc
+                lr_custext->set_property( iv_attr_name = 'ZZMISSION'  iv_value = ls_serial_no-proj_number ).
+                lr_custext->set_property( iv_attr_name = 'ZZPROJMAN'  iv_value = ls_serial_no-projmanager ).
+                lr_custext->set_property( iv_attr_name = 'ZZPMNR'     iv_value = ls_serial_no-projmanager_no ).
+
+                CALL FUNCTION 'CONVERSION_EXIT_ZZMAT_INPUT'
+                  EXPORTING
+                    input  = ls_serial_no-material_no
+                  IMPORTING
+                    output = lv_eq_mat.
+
+                DATA(lr_btbosset) = lr_adminh->get_related_entity( 'BTHeaderBOSSet' ).
+                DATA(lr_btrefobj) = lr_btbosset->get_related_entity( 'BTRefObjSet_A' ).
+                DATA(lr_refobjects) = lr_btrefobj->get_related_entities( iv_relation_name = 'BTRefObjectAll' ).
+                DATA(lr_machine) = lr_adminh->create_related_entity( iv_relation_name = 'ZEXT_BOL_RELAT000001' ).
+
+                IF lr_refobjects IS BOUND AND lr_refobjects->size( ) <> 0.
+                  DATA(lr_1entity) = lr_refobjects->get_first( ).
+                  WHILE lr_1entity IS BOUND.
+                    DATA(lv_product_type) = lr_1entity->get_property_as_string( 'ZMAT_TYPE' ).
+                    IF lv_product_type = 'E'.
+                      DATA(lr_bteqmatobj_e) = lr_1entity.
+                    ELSEIF lv_product_type = 'M'.
+                      DATA(lr_bteqmatobj_m) = lr_1entity.
+                    ENDIF.
+                    lr_1entity = lr_refobjects->get_next( ).
+                  ENDWHILE.
+                ENDIF.
+
+                IF line_exists( lt_equipments[ r3ser_no = ls_ors_ti-zzmachinesn ] ).
+                  DATA(lv_iobject_guid) = lt_equipments[ r3ser_no = ls_ors_ti-zzmachinesn ]-product_guid.
+                  DATA(lv_machine_syst) =  zcl_ir_util_trex=>get_machine_system( lv_iobject_guid ).
+                ENDIF.
+
+                IF lr_bteqmatobj_e IS NOT BOUND.
+                  lr_bteqmatobj_e = lr_btrefobj->create_related_entity( 'BTRefObjectAll' ).
+                  IF lr_bteqmatobj_e IS NOT BOUND.
+                    RAISE EXCEPTION TYPE zcx_qma_exception
+                      EXPORTING
+                        textid = zcx_qma_exception=>zcx_ti_update_failed.
+                  ENDIF.
+                  lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'ZMAT_TYPE' iv_value = 'E' ).
+                ENDIF.
+
+                lr_bteqmatobj_e->set_property( iv_attr_name = 'PRODUCT_ID' iv_value = ls_serial_no-equipment_id ).
+                lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'TYPE_OBJECT' iv_value = 'C' ).
+                IF lv_iobject_guid IS NOT INITIAL.
+                  lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'PRODUCT_GUID' iv_value =  CONV #( lv_iobject_guid ) ).
+                ENDIF.
+
+                IF lr_bteqmatobj_m IS NOT BOUND.
+                  lr_bteqmatobj_m = lr_btrefobj->create_related_entity( 'BTRefObjectAll' ).
+                  IF lr_bteqmatobj_m IS NOT BOUND.
+                    RAISE EXCEPTION TYPE zcx_qma_exception
+                      EXPORTING
+                        textid = zcx_qma_exception=>zcx_ti_update_failed.
+                  ENDIF.
+                  lr_bteqmatobj_m->set_property_as_string( iv_attr_name = 'ZMAT_TYPE' iv_value = 'M' ).
+                ENDIF.
+                lr_bteqmatobj_m->set_property( iv_attr_name = 'PRODUCT_ID' iv_value = lv_eq_mat ).
+
+                IF lv_iobject_guid IS NOT INITIAL AND line_exists( lt_equipments[ product_guid = lv_iobject_guid ] ).
+                  DATA(lv_matdesc) = lt_equipments[ product_guid = lv_iobject_guid ]-short_text.
+                ENDIF.
+
+                lr_bteqmatobj_e->set_property_as_string( iv_attr_name = 'ZZMACHINESYSTEM' iv_value = CONV #( lv_matdesc ) ).
+
+                lr_machine->set_property_as_string( iv_attr_name = 'ZZFLD0000DT' iv_value = lv_machine_syst ).
+                lr_machine->set_property_as_string( iv_attr_name = 'ZZFLD0000JB' iv_value = CONV #( lv_eq_mat ) ).
+                lr_machine->set_property( iv_attr_name = 'ZZFLD0000DU' iv_value = lv_matdesc ).
+
+                IF p_test IS INITIAL.
+                  lr_core->modify( ).
+                  CHECK lr_adminh->get_transaction( ) IS BOUND.
+                  lr_adminh->get_transaction( )->check_save_possible( ).
+                  IF lr_adminh->get_transaction( )->save( ) = abap_true.
+                    lr_adminh->get_transaction( )->commit( ). " commit the changes
+                    DATA(lv_saved) = abap_true.
+                  ELSE.
+                    lr_adminh->get_transaction( )->rollback( ).
+                    lv_saved = abap_false.
+                  ENDIF.
+                ELSE.
+                  lv_saved = abap_true.
+                ENDIF.
+              ELSE.
+                lv_saved = abap_false.
+              ENDIF.
+            ELSE.
+              lv_saved = abap_false.
+            ENDIF.
+          CATCH cx_root.
+            lv_saved = abap_false.
+        ENDTRY.
+
+        IF lv_saved = abap_false.
+          WRITE: / |Problem Processing: | && ls_ors_ti-object_id &&  COND #( WHEN lines( lt_serials ) > 1 THEN | were multiple | ELSE | was unique | ) && ls_serial_no-equipment_id..
+        ELSE.
+          WRITE: / |Processed TI: | && ls_ors_ti-object_id &&  COND #( WHEN lines( lt_serials ) > 1 THEN | were multiple | ELSE | was unique | ) && ls_serial_no-equipment_id.
+        ENDIF.
+
+        DELETE s_object WHERE low = ls_ors_ti-object_id.
+        CLEAR: lr_adminh, lr_machine, lr_custext, lr_bteqmatobj_e, lr_bteqmatobj_m, lr_1entity, lr_btbosset, lr_btrefobj,
+               lr_refobjects, lr_machine, lv_matdesc, lv_iobject_guid, lv_machine_syst, ls_serial_no, lv_saved.
+        REFRESH: lt_serials, lt_equipments.
+      ENDIF.
+
+    ENDIF.
+
+  ENDLOOP.
+
+  LOOP AT s_object INTO DATA(s_single_obj).
+    WRITE: / |Skipped: | && s_single_obj-low.
+  ENDLOOP.
