@@ -1,0 +1,378 @@
+  METHOD eh_oncreatethemis.
+
+    INCLUDE z_ir_constants.
+
+    DATA lr_cn                TYPE REF TO cl_bsp_wd_context_node.
+    DATA ls_attributes        TYPE zzs_r3createclaim.
+    DATA lv_material_type     TYPE string.
+    DATA lv_rfcdest           TYPE rfcdest.
+    DATA lr_message           TYPE REF TO cl_bsp_wd_message_service.
+    DATA lv_object_type       TYPE crmt_subobject_category_db.
+    DATA lv_claim_number      TYPE qmnum.
+    DATA lv_claim_r3id        TYPE aufnr.
+    DATA lt_return            TYPE bapiret2_t.
+    DATA lv_cat2              TYPE string.
+    DATA lv_itp               TYPE string.
+    DATA lr_customerh         TYPE REF TO cl_crm_bol_entity.
+    DATA lr_btadmin_h         TYPE REF TO cl_crm_bol_entity.
+    DATA lv_part_run_hrs_dec  TYPE zdtel000011.
+    DATA lv_eq_run_hrs_int    TYPE i.
+    DATA lv_eq_run_hrs_str    TYPE zdtel00001b.
+    DATA lv_eq_run_hrs_dec    TYPE p DECIMALS 2.
+    DATA lv_wdate             TYPE dats.
+    DATA lv_vdate             TYPE dats.
+    DATA lv_qmnum             TYPE qmnum.
+    DATA ls_notif_data        TYPE ztp_claims.
+    DATA lv_part_quant        TYPE crmt_quantity.
+    DATA lv_part_units        TYPE co_meinh. 
+
+    " Our message service instance
+    lr_message = me->view_manager->get_message_service( ).
+
+    " Check for linked claim existence
+    lv_claim_number = me->docflow_check_r3( zir_object_types-service_notif ).
+    IF lv_claim_number IS NOT INITIAL.
+      SHIFT lv_claim_number LEFT DELETING LEADING '0'.
+      CONDENSE lv_claim_number.
+      " Claim &1 is already exists in Related R/3 Documents block!
+      lr_message->add_message( iv_msg_type    = 'E'
+                                        iv_msg_id      = zir_msg_class-ztp_ir_messages
+                                        iv_msg_number  = '165'
+                                        iv_msg_v1 = 'Claim '
+                                        iv_msg_v2 = lv_claim_number
+                                        iv_msg_v3 = ' already linked to issue (''Check the'
+                                        iv_msg_v4 = ' ''Related SAP ECC Documents'')'
+                                        ).
+      RETURN.
+    ENDIF.
+
+* Get current AdminH-Entity
+    lr_cn = get_context_node( gc_cn_btadminh ).
+    CHECK lr_cn IS BOUND.
+
+    lr_btadmin_h ?= lr_cn->collection_wrapper->get_current( ).
+    CHECK lr_btadmin_h IS BOUND.
+
+    DATA(lv_part_no) = CONV comt_product_id(  me->get_part_no( lr_btadmin_h ) ).
+
+    CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+      EXPORTING
+        input  = lv_part_no
+      IMPORTING
+        output = lv_part_no.
+
+    CALL FUNCTION 'ZFM_IR_CONVERSION_ZZMAT_INPUT'
+      EXPORTING
+        input  = lv_part_no
+      IMPORTING
+        output = lv_part_no.
+
+    CONDENSE lv_part_no.
+
+    DATA(lv_material) = me->get_material( lr_btadmin_h ).
+    DATA(lv_equipment_no) = me->get_equip_no( lr_btadmin_h ).
+
+    DATA(lv_ti_id) = lr_btadmin_h->get_property_as_string( 'OBJECT_ID' ).
+
+    CALL METHOD me->is_ci_customer_resp
+      EXPORTING
+        ir_header    = lr_btadmin_h
+      IMPORTING
+        ev_no_ci     = DATA(lv_ci_not_exist)
+      RECEIVING
+        rv_cust_resp = DATA(lv_ci_cust_resp).
+
+    IF lv_ci_not_exist = abap_true.
+      lr_message->add_message( iv_msg_type    = 'E'
+                                     iv_msg_id      = zir_msg_class-ztp_ir_messages
+                                     iv_msg_number  = '165'
+                                     iv_msg_v1 = 'No CI linked'
+                                     ).
+      DATA(lv_exit) = abap_true.
+    ENDIF.
+
+    DATA(lv_b_group) = lr_btadmin_h->get_property_as_string( 'ZZBGR' ).
+
+    lr_customerh ?= lr_btadmin_h->get_related_entity( iv_relation_name = 'BTHeaderCustExt' ).
+    CHECK lr_customerh IS BOUND.
+    DATA(lv_serial) = lr_customerh->get_property_as_string( 'ZZMACHINESN' ).
+    DATA(lv_c_group) = lr_customerh->get_property_as_string( 'ZZCGROUP' ).
+
+    me->get_part_quant_and_units(
+      EXPORTING
+        ir_customerh  = lr_customerh
+      IMPORTING
+        ev_part_quant = lv_part_quant
+        ev_units      = lv_part_units ).
+
+    DATA(lv_business_type) = me->get_bizagi_business_type( lr_customerh ).
+
+    CALL METHOD lr_customerh->get_property_as_value
+      EXPORTING
+        iv_attr_name = 'ZZMATRUNHOURS'
+      IMPORTING
+        ev_result    = lv_part_run_hrs_dec.
+
+    CALL METHOD lr_customerh->get_property_as_value
+      EXPORTING
+        iv_attr_name = 'ZZEQRUNHOURS'
+      IMPORTING
+        ev_result    = lv_eq_run_hrs_str.
+
+    " Start of insert  
+    IF lr_customerh->get_property_as_string( 'ZZMATRUNHOURS' ) IS INITIAL
+      OR lr_customerh->get_property_as_string( 'ZZEQRUNHOURS' ) IS INITIAL.
+      CHECK lr_message IS BOUND.
+      lr_message->add_message( iv_msg_type    = 'E'
+                                     iv_msg_id      = zir_msg_class-ztp_ir_messages
+                                     iv_msg_number  = '165'
+                                     iv_msg_v1 = 'Eq hrs or Part hrs is blank'
+                                     ).
+      lv_exit = abap_true.
+
+    ENDIF.
+
+    lv_eq_run_hrs_dec = lv_eq_run_hrs_str.
+
+    DATA(lv_occ_date) = me->get_ti_occurdate( lr_btadmin_h ).
+    lv_occ_date = |{ lv_occ_date+0(4) }-{ lv_occ_date+4(2) }-{ lv_occ_date+6(2) }|.
+
+    lv_itp = lr_customerh->get_property_as_string( 'ZZITP_FLAG' ).
+
+*    lv_part_run_hrs_dec = lv_part_run_hours.
+
+*    IF lv_part_run_hrs_dec <> lv_eq_run_hrs_dec.
+*      CHECK lr_message IS BOUND.
+*      lr_message->add_message( iv_msg_type    = 'E'
+*                                     iv_msg_id      = zir_msg_class-ztp_ir_messages
+*                                     iv_msg_number  = '165'
+*                                     iv_msg_v1 = 'Eq hrs is not the same as Part hrs'
+*                                     iv_msg_v2 = ' (out of scope for now,'
+*                                     iv_msg_v3 = ' will be developed in next phase)'
+*                                     ).
+*      lv_exit = abap_true.
+*    ENDIF.
+
+
+*    IF ( ( lv_part_run_hrs_dec IS INITIAL OR lv_part_no IS INITIAL )
+*          AND ( lv_eq_run_hrs_dec IS NOT INITIAL
+*      AND lv_equipment_no IS NOT INITIAL ) )
+*          OR ( ( lv_part_run_hrs_dec IS NOT INITIAL
+*       AND lv_part_no IS NOT INITIAL )
+*          AND ( lv_eq_run_hrs_dec IS INITIAL OR lv_equipment_no IS INITIAL ) ).
+*      CHECK lr_message IS BOUND.
+*      lr_message->add_message( iv_msg_type    = 'E'
+*                                     iv_msg_id      = zir_msg_class-ztp_ir_messages
+*                                     iv_msg_number  = '165'
+*                                     iv_msg_v1 = 'Eq hrs is not the same as Part hrs'
+*                                     iv_msg_v2 = ' (out of scope for now,'
+*                                     iv_msg_v3 = ' will be developed in next phase)'
+*                                     ).
+*      lv_exit = abap_true.
+*    ENDIF.
+
+    IF lv_part_no IS INITIAL
+      OR lv_equipment_no IS INITIAL
+      OR lv_serial IS INITIAL.
+      CHECK lr_message IS BOUND.
+      lr_message->add_message( iv_msg_type    = 'E'
+                                     iv_msg_id      = zir_msg_class-ztp_ir_messages
+                                     iv_msg_number  = '165'
+                                     iv_msg_v1 = 'Serial No,Part No and Equipment No are mandatory'
+                                     ).
+      lv_exit = abap_true.
+    ENDIF.
+
+    IF lv_exit = abap_true.
+      RETURN.
+    ENDIF.
+
+    CALL METHOD zcl_ir_ti_lt_utils=>get_categories
+      EXPORTING
+        ir_entity = lr_btadmin_h
+      IMPORTING
+        ev_cat2   = lv_cat2.
+
+    CASE lv_cat2.
+      WHEN zir_category-packmat.
+        ls_attributes-smcode  = '02'.    "Type  - Pack
+        ls_attributes-smdama  = '6102'.  "Damage Code
+        lv_material_type = 'Pack'.
+      WHEN zir_category-addmat.
+        ls_attributes-smcode  = '04'.    "Type  - Add
+        ls_attributes-smdama  = '4901'.  "Damage Code - Dimensions and Shape
+        ls_attributes-smcause = '99'.    "Cause Code - Other Reason
+        lv_material_type = 'Add'.
+*   In-plant automation
+      WHEN zir_category-in_plant_autom.
+        IF lv_itp = abap_true.
+          ls_attributes-smcode  = '01'.  "Type  - Parts for Equipment under Warranty
+        ELSE.
+          ls_attributes-smcode  = '05'.  "Type  - System Related
+        ENDIF.
+        ls_attributes-smcause = '99'.    "Cause Code - Other Reason
+        lv_material_type = 'SystemRelated'.
+*   Equipment & SP
+      WHEN zir_category-equipment.
+        IF lv_itp = abap_true.
+          ls_attributes-smcode  = '01'.  "Type  - Parts for Equipment under Warranty
+        ELSE.
+          ls_attributes-smcode  = '03'.  "Type  - Parts for Equipment out of Warranty
+        ENDIF.
+        ls_attributes-smdama  = '99'.    "Damage Code - Other Reason
+        ls_attributes-smcause = '06'.    "Cause Code - Parts failure
+        lv_material_type = 'Equipment'.
+      WHEN zir_category-service.
+        ls_attributes-smcode  = '06'.    "Type  - Service
+        "ls_attributes-smdama  = '4901'.  "Damage Code - Dimensions and Shape
+        ls_attributes-smcause = '99'.    "Cause Code - Other Reason
+        lv_material_type = 'Service'.
+      WHEN OTHERS.
+        ls_attributes-smcode  = '05'.    "Type  - System Related
+        ls_attributes-smcause = '99'.    "Cause Code - Other Reason
+        lv_material_type = 'SystemRelated'.
+    ENDCASE.
+
+    " Get RFC Destination name
+    zcl_ir_util=>get_rfc_destination(
+      EXPORTING
+        im_msg_srv  = lr_message
+        iv_trusting = abap_true
+      RECEIVING
+        em_rfcdest  = lv_rfcdest ).
+
+    CHECK lv_rfcdest IS NOT INITIAL.
+
+******************************************
+*******       Create Claim         *******
+******************************************
+    CALL METHOD zcl_ir_util_r3=>create_notification
+      EXPORTING
+        ir_btadminh      = lr_btadmin_h
+        ir_message       = lr_message
+        iv_type          = 'CLAIM'
+        iv_material_type = lv_material_type
+        iv_rfcdest       = lv_rfcdest
+        is_attributes    = ls_attributes
+      IMPORTING
+        ev_number        = lv_claim_number
+        et_return        = lt_return.
+
+    IF lv_claim_number IS NOT INITIAL.
+      " Claim &1 has been successfully created in R/3 system
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+        EXPORTING
+          input  = lv_claim_number
+        IMPORTING
+          output = lv_claim_number.
+      lr_message->add_message( iv_msg_type    = 'I'
+                               iv_msg_id      = 'ZTP_IR_MESSAGES'
+                               iv_msg_number  = '014'
+                               iv_msg_v1      = lv_claim_number ).
+
+
+      CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+        EXPORTING
+          input  = lv_claim_number
+        IMPORTING
+          output = lv_qmnum.
+
+      CALL FUNCTION '/TPISP/YI_GET_NOTIF_DETAILS'
+        DESTINATION lv_rfcdest
+        EXPORTING
+          i_qmnum      = lv_qmnum
+        IMPORTING
+          e_notif_data = ls_notif_data.
+
+      IF ls_notif_data IS NOT INITIAL.
+        DATA(lv_claim_description) = ls_notif_data-qmtxt.
+      ENDIF.
+
+      CALL FUNCTION '/TPISP/YCRM_EQUIPMENT_DATA'
+        DESTINATION lv_rfcdest
+        EXPORTING
+          im_equipment = CONV equnr( lv_equipment_no )
+        IMPORTING
+          ex_wdate     = lv_wdate
+          ex_vdate     = lv_vdate.
+
+      DATA(lv_wdate_str) = |{ lv_wdate+0(4) }-{ lv_wdate+4(2) }-{ lv_wdate+6(2) }|.
+      DATA(lv_vendord_str) = |{ lv_vdate+0(4) }-{ lv_vdate+4(2) }-{ lv_vdate+6(2) }|.
+
+      lv_eq_run_hrs_int = lv_eq_run_hrs_dec.
+
+      CALL METHOD zcl_ir_controller=>create_case
+        EXPORTING
+          iv_claim_id      = CONV #( lv_claim_number )
+          iv_eq_hrs        = CONV #( lv_eq_run_hrs_int )
+          iv_material_no   = CONV #( lv_material )
+          iv_occ_date      = lv_occ_date
+          iv_wrrt_date     = lv_wdate_str
+          iv_vendorwd      = lv_vendord_str
+          iv_ti_id         = lv_ti_id
+          iv_part_no       = CONV #( lv_part_no )
+          iv_b_group       = lv_b_group
+          iv_c_group       = lv_c_group
+          iv_eq_no         = CONV #( lv_equipment_no )
+          iv_claim_title   = CONV #( lv_claim_description )
+          iv_baven_wrntd   = lv_vendord_str
+          iv_cust_resp     = COND string( WHEN lv_ci_cust_resp = abap_true
+              THEN 'true' ELSE 'false' )
+          iv_part_quant    = CONV #( lv_part_quant )  
+          iv_part_uom      = CONV #( lv_part_units )    
+          iv_business_type = CONV #( lv_business_type ) 
+        RECEIVING
+          rv_case_id       = DATA(lv_case_id).
+
+      IF lv_case_id IS NOT INITIAL
+        AND lr_message IS BOUND.
+        lr_message->add_message( iv_msg_type    = 'I'
+                                          iv_msg_id      = zir_msg_class-ztp_ir_messages
+                                          iv_msg_number  = '165'
+                                          iv_msg_v1 = 'Сase '
+                                          iv_msg_v2 = lv_case_id
+                                          iv_msg_v3 = ' created'
+                                          ).
+      ENDIF.
+
+      lv_claim_r3id = lv_claim_number.
+
+***********************************************************************************
+***   Update document flow (Related R/3 Documents) with Created Claim document  ***
+***********************************************************************************
+      lv_object_type = lr_btadmin_h->get_property_as_string( 'OBJECT_TYPE' ).
+
+      CALL METHOD zcl_ir_util=>docflow_update_r3_claim
+        EXPORTING
+          im_bus         = zir_object_types-service_notif
+          im_r3id        = lv_claim_r3id
+          im_date        = sy-datum
+          iv_rfcdest     = lv_rfcdest
+          iv_entity      = lr_btadmin_h
+          iv_object_type = lv_object_type.
+
+      IF NOT lr_btadmin_h->is_locked( ).
+        lr_btadmin_h->lock( ).
+      ENDIF.
+
+      IF lv_wdate IS NOT INITIAL.
+        lr_btadmin_h->set_property(
+        iv_value = lv_wdate iv_attr_name = 'ZZWARRENDDATE' ).
+      ENDIF.
+
+      IF lv_vdate IS NOT INITIAL.
+        lr_btadmin_h->set_property(
+        iv_value = lv_vdate iv_attr_name = 'ZZVENDORDATE' ).
+      ENDIF.
+
+      me->save( ).
+    ELSE.
+      lt_return = zcl_ir_util=>prepare_bapiret_from_r3( lt_return ).
+      " R/3 messages output
+      lr_message->add_bapi_messages( it_bapi_messages = lt_return ).
+      " Claim has not been created due to errors
+      lr_message->add_message(  iv_msg_type    = 'I'
+                                iv_msg_id      = 'ZTP_IR_MESSAGES'
+                                iv_msg_number  = '110' ).
+    ENDIF.
+  ENDMETHOD.
