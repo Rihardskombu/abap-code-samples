@@ -1,0 +1,228 @@
+METHOD create_case.
+  INCLUDE z_ir_constants.
+
+  TYPES: BEGIN OF ty_data,
+           odata_context TYPE string,
+           value         TYPE string,
+         END OF ty_data.
+
+  DATA: ls_bizagi_case TYPE ztp_bizagi_cases,
+        lr_http_client TYPE REF TO if_http_client,
+        lr_data        TYPE REF TO data,
+        ls_data        TYPE ty_data,
+        lv_body_x      TYPE xstring.
+
+  DATA lt_text_table    TYPE STANDARD TABLE OF text50.
+  DATA lt_request_body  TYPE crmt_terrman_values_t.
+  DATA lt_response_body TYPE crmt_terrman_values_t.
+
+  CALL METHOD cl_http_client=>create_by_destination
+    EXPORTING
+      destination              = 'APIGEE'
+    IMPORTING
+      client                   = lr_http_client
+    EXCEPTIONS
+      argument_not_found       = 1
+      destination_not_found    = 2
+      destination_no_authority = 3
+      plugin_not_active        = 4
+      internal_error           = 5
+      OTHERS                   = 6.
+
+  IF sy-subrc <> 0.
+    CALL METHOD zcl_apigee_client=>update_app_log
+      EXPORTING
+        iv_log_subobject = zcl_apigee_client=>gc_api_log_subobj_bizagi
+        iv_msgty         = zir_message_type-error
+        iv_msgid         = zcx_apigee_exception=>zcx_connection_error-msgid
+        iv_msgno         = zcx_apigee_exception=>zcx_connection_error-msgno.
+    RETURN.
+
+  ENDIF.
+
+  DATA(lv_url) = |/application/BWM/odata/data/processes/start|.
+
+  cl_http_utility=>set_request_uri( request  = lr_http_client->request uri = lv_url ).
+
+  CALL METHOD lr_http_client->request->set_method
+    EXPORTING
+      method = 'POST'.
+
+  lr_http_client->request->set_header_field(
+    name = 'Content-Type' ##NO_TEXT
+    value = 'application/json'
+    ).
+
+  CONCATENATE '{"startParameters":[{"value":' iv_eq_hrs ',"xpath":"mCustomerIssueCare.fEquipmenthours"},'
+   '{"value":' iv_eq_hrs ',"xpath":"mCustomerIssueCare.fSpareParthours"},'
+   '{"value":"' iv_occ_date '","xpath":"mCustomerIssueCare.dTIOccurenceDate"},'
+   INTO DATA(lv_json).
+
+  IF iv_wrrt_date <> '0000-00-00'.
+    CONCATENATE lv_json
+    '{"value":"' iv_wrrt_date '","xpath":"mCustomerIssueCare.dWarrantyDate"},'
+    INTO lv_json.
+  ENDIF.
+
+  CONCATENATE lv_json
+  '{"value":' iv_cust_resp ',"xpath":"mCustomerIssueCare.bCustomerResponsible"},'
+  '{"value":"' iv_claim_id '","xpath":"mCustomerIssueCare.sClaimNotificationNumber"},'
+  '{"value":"' iv_ti_id '","xpath":"mCustomerIssueCare.sTINumber"},'
+  '{"value":"' iv_part_no '","xpath":"mCustomerIssueCare.sPartNumber"},'
+  '{"value":"' iv_material_no '","xpath":"mCustomerIssueCare.sMaterialNumber"},'
+  '{"value":"' iv_b_group '","xpath":"mCustomerIssueCare.sBGroup"},'
+  '{"value":"' iv_c_group '","xpath":"mCustomerIssueCare.sCGroupMUUpgrade"},'
+  '{"value":"' sy-uname '","xpath":"mCustomerIssueCare.sUserNTID"},'
+  '{"value":"' iv_eq_no '","xpath":"mCustomerIssueCare.sEquipmentNumber"},'
+  '{"value":"' iv_part_quant '","xpath":"mCustomerIssueCare.sPartQuantityValue"},'"Part Quantity  
+  '{"value":"' iv_part_uom '","xpath":"mCustomerIssueCare.sPartQuantity"},'"Part Quantity UoM  
+  '{"value":"' iv_business_type '","xpath":"mCustomerIssueCare.kpPortfolio"},' " Business Type   
+  INTO lv_json.
+
+  IF iv_vendorwd <> '0000-00-00'.
+    CONCATENATE lv_json
+     '{"value":"' iv_vendorwd '","xpath":"mCustomerIssueCare.dBAVendorWarrantyEndDate"},'
+     INTO lv_json.
+  ENDIF.
+
+  CONCATENATE lv_json
+   '{"value":"' iv_claim_title '","xpath":"mCustomerIssueCare.sClaimTitle"}]}'
+   INTO lv_json.
+
+  CALL FUNCTION 'SCMS_STRING_TO_XSTRING'
+    EXPORTING
+      text   = lv_json
+    IMPORTING
+      buffer = lv_body_x.
+
+  lr_http_client->request->set_data( lv_body_x ).
+
+  TRY.
+      DATA(lv_token) = zcl_apigee_token_cache=>get_instance( )->get_access_token( ).
+      IF lv_token IS INITIAL.
+        CALL METHOD zcl_apigee_client=>update_app_log
+          EXPORTING
+            iv_log_subobject = zcl_apigee_client=>gc_api_log_subobj_token
+            iv_msgty         = zir_message_type-error
+            iv_msgid         = zcx_apigee_exception=>zcx_token_error-msgid
+            iv_msgno         = zcx_apigee_exception=>zcx_token_error-msgno.
+        RETURN.
+      ENDIF.
+    CATCH  zcx_apigee_exception.
+      RETURN.
+  ENDTRY.
+
+  lr_http_client->request->set_header_field(
+      name = 'Authorization' ##NO_TEXT
+      value = lv_token ).
+
+  CALL METHOD lr_http_client->send
+    EXPORTING
+      timeout                    = 60   " 60 Seconds 
+    EXCEPTIONS
+      http_communication_failure = 1
+      http_invalid_state         = 2.
+
+  IF sy-subrc <> 0.
+    CALL METHOD zcl_apigee_client=>update_app_log
+      EXPORTING
+        iv_log_subobject = zcl_apigee_client=>gc_api_log_subobj_bizagi
+        iv_msgty         = zir_message_type-error
+        iv_msgid         = zcx_apigee_exception=>zcx_connection_error-msgid
+        iv_msgno         = zcx_apigee_exception=>zcx_connection_error-msgno.
+    RETURN.
+  ENDIF.
+
+  CALL METHOD lr_http_client->receive
+    EXCEPTIONS
+      http_communication_failure = 1
+      http_invalid_state         = 2
+      http_processing_failed     = 3.
+
+  IF sy-subrc <> 0.
+    CALL METHOD zcl_apigee_client=>update_app_log
+      EXPORTING
+        iv_log_subobject = zcl_apigee_client=>gc_api_log_subobj_bizagi
+        iv_msgty         = zir_message_type-error
+        iv_msgid         = zcx_apigee_exception=>zcx_connection_error-msgid
+        iv_msgno         = zcx_apigee_exception=>zcx_connection_error-msgno.
+
+    RETURN.
+  ENDIF.
+
+  lr_http_client->response->get_status( IMPORTING code =
+    DATA(lv_http_return_code) ).
+
+  CALL METHOD lr_http_client->refresh_request(
+    EXCEPTIONS
+      http_action_failed = 1
+      OTHERS             = 2 ).
+
+  DATA(lv_result) = lr_http_client->response->get_cdata( ).
+
+  IF lv_result IS NOT INITIAL.
+
+    CASE lv_http_return_code.
+      WHEN '200'."OK
+
+        /ui2/cl_json=>deserialize(
+            EXPORTING json = lv_result
+            CHANGING  data = ls_data ).
+
+        IF ls_data-value IS NOT INITIAL.
+          ls_bizagi_case-bizagi_case_tech_id = ls_data-value.
+          ls_bizagi_case-ti_id = iv_ti_id.
+          ls_bizagi_case-claim_id = iv_claim_id.
+
+          ls_bizagi_case-bizagi_case_user_id = convert_case(
+          iv_case_tech_id = CONV #( ls_bizagi_case-bizagi_case_tech_id )
+          iv_token = lv_token ).
+          INSERT ls_bizagi_case INTO TABLE gt_to_save."++DR1K917118
+          rv_case_id = ls_bizagi_case-bizagi_case_user_id.
+        ENDIF.
+
+      WHEN OTHERS.
+
+        CALL METHOD zcl_apigee_client=>update_app_log
+          EXPORTING
+            iv_log_subobject = zcl_apigee_client=>gc_api_log_subobj_bizagi
+            iv_msgty         = zir_message_type-error
+            iv_msgid         = zcx_apigee_exception=>zcx_server_error-msgid
+            iv_msgno         = zcx_apigee_exception=>zcx_server_error-msgno.
+
+
+        CALL METHOD zcl_ir_bizagi_controller=>convert_str_to_50char_table( EXPORTING iv_str = lv_json RECEIVING rt_texts = lt_request_body ).
+        CALL METHOD zcl_ir_bizagi_controller=>convert_str_to_50char_table( EXPORTING iv_str = lv_result RECEIVING rt_texts = lt_response_body ).
+
+        LOOP AT lt_request_body INTO DATA(ls_request_body).
+          IF sy-tabix = 1.
+            APPEND 'Request:' TO lt_text_table.
+            APPEND INITIAL LINE TO lt_text_table.
+          ENDIF.
+          APPEND ls_request_body TO lt_text_table.
+        ENDLOOP.
+
+        APPEND INITIAL LINE TO lt_text_table.
+        APPEND INITIAL LINE TO lt_text_table.
+
+        LOOP AT lt_response_body INTO DATA(ls_response_body).
+          IF sy-tabix = 1.
+            APPEND 'Response:' TO lt_text_table.
+            APPEND INITIAL LINE TO lt_text_table.
+          ENDIF.
+          APPEND ls_response_body TO lt_text_table.
+        ENDLOOP.
+
+        " Save request and response payloads to SGL1 log for better troubleshooting
+        CALL METHOD zcl_apigee_client=>update_app_log_table
+          EXPORTING
+            iv_log_subobject = zcl_apigee_client=>gc_api_log_subobj_bizagi
+            iv_msgty         = zir_message_type-error
+            iv_msgid         = zcx_apigee_exception=>zcx_free_text_error-msgid
+            iv_msgno         = zcx_apigee_exception=>zcx_free_text_error-msgno
+            it_logs          = lt_text_table.
+    ENDCASE.
+
+  ENDIF.
+
+ENDMETHOD.
