@@ -1,0 +1,30 @@
+  METHOD convert_str_to_50char_table.
+*   DESCRIPTION: CiC. New method for SLG1 troubleshooting
+*                split long sting to table of 50 chars
+*-----------------------------------------------------------------------------------------*
+    DATA lt_text_table TYPE STANDARD TABLE OF text50.
+    DATA lv_json_to_split TYPE string.
+
+    CHECK iv_str IS NOT INITIAL.
+
+    DATA(lv_strlen) = strlen( iv_str ).
+    DATA(lv_sep) = 50.
+    DATA(lv_count) = 0.
+
+    " Example - an input string with 103 chars length
+    " After below while lt_text_table will contain row1 50 chars + row2 50
+    WHILE lv_strlen - lv_count > lv_sep.
+      APPEND iv_str+lv_count(lv_sep) TO lt_text_table.
+      lv_count = lv_count + lv_sep.
+    ENDWHILE.
+
+    " Below append will add a reminder that left after while loop 103 - 100 = 3
+    APPEND iv_str+lv_count TO lt_text_table.
+
+    " Return table will look like:
+    "     row1 50 chars
+    "     row2 50 chars
+    "     row3 3 chars
+
+    rt_texts =  lt_text_table.
+  ENDMETHOD.
