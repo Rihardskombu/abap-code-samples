@@ -1,0 +1,114 @@
+REPORT  Z_CRM_ORDER_READ.
+
+INCLUDE crm_direct.
+
+DATA:   lt_guids            TYPE crmt_object_guid_tab,
+          ls_guids            LIKE LINE OF lt_guids,
+          lt_text             TYPE crmt_text_wrkt,
+          ls_text             TYPE crmt_text_wrk,
+lt_req_objects      TYPE crmt_object_name_tab.
+
+ls_guids = '005056AFE4121EDDBFBF5B6C20022905'. "Service req. guid
+append ls_guids to lt_guids.
+INSERT gc_object_name-texts INTO TABLE lt_req_objects.
+
+CALL FUNCTION 'CRM_ORDER_READ'
+ EXPORTING
+   IT_HEADER_GUID                    = lt_guids
+*   IT_ITEM_GUID                      =
+*   IV_MODE                           =
+*   IV_ONLY_SPEC_ITEMS                =
+   IT_REQUESTED_OBJECTS              = lt_req_objects
+   iv_no_auth_check     = 'X'
+*   IT_ITEM_USAGE_RANGE               =
+*   IV_SUBITEM_DEPTH                  = -1
+*   IT_OBJECT_FILTER                  =
+*   IV_ONLY_CHANGED_OBJ               = FALSE
+*   IV_STATUS_H_CHECK_RELEVANCE       = FALSE
+ IMPORTING
+*   ET_ORDERADM_H                     =
+*   ET_OPPORT_H                       =
+*   ET_LEAD_H                         =
+*   ET_ACTIVITY_H                     =
+*   ET_LAWREF_H                       =
+*   ET_ORDERADM_I                     =
+*   ET_OPPORT_I                       =
+*   ET_ACTIVITY_I                     =
+*   ET_PRODUCT_I                      =
+*   ET_FINPROD_I                      =
+*   ET_BATCH                          =
+*   ET_CONFIG                         =
+*   ET_STRUCT_I                       =
+*   ET_SALES                          =
+*   ET_PRICING                        =
+*   ET_PRICING_I                      =
+*   ET_ORGMAN                         =
+*   ET_SHIPPING                       =
+*   ET_CUSTOMER_H                     =
+*   ET_CUSTOMER_I                     =
+*   ET_SERVICE_H                      =
+*   ET_SERVICE_I                      =
+*   ET_SERVICE_ASSIGN                 =
+*   ET_QUALIF                         =
+*   ET_PAYPLAN                        =
+*   ET_PAYPLAN_D                      =
+*   ET_APPOINTMENT                    =
+   ET_TEXT                           = lt_text
+*   ET_SCHEDLIN                       =
+*   ET_PARTNER                        =
+*   ET_SERVICE_OS                     =
+*   ET_REFOBJ                         =
+*   ET_SUBJECT                        =
+*   ET_CUMULAT_H                      =
+*   ET_STATUS                         =
+*   ET_STATUS_H                       =
+*   ET_SCHEDLIN_I                     =
+*   ET_CANCEL                         =
+*   ET_CANCEL_IR                      =
+*   ET_CANCEL_CR                      =
+*   ET_BILLPLAN                       =
+*   ET_BILLING                        =
+*   ET_ORDPRP_I                       =
+*   ET_ORDPRP_I_D                     =
+*   ET_ORDPRP_OBJL_I_D                =
+*   ET_CUMULATED_I                    =
+*   ET_DOC_FLOW                       =
+*   ET_EXCEPTION                      =
+*   ET_PRIDOC                         =
+*   ET_PRICE_AGREEMENTS_CRM           =
+*   ET_PRICE_AGREEMENTS_BBP           =
+*   ET_CONFIG_FILTER                  =
+*   ET_SERVICEPLAN_I                  =
+*   ET_SERVICEPLAN_IE                 =
+*   ET_EXTENSION                      =
+*   ET_CREDITVALUES                   =
+*   ET_SURVEY                         =
+*   ET_AC_ASSIGN                      =
+*   ET_APO_I                          =
+*   ET_EXT_REF                        =
+*   ET_UBB_CTR_I                      =
+*   ET_UBB_CR_I                       =
+*   ET_UBB_VOL_I                      =
+*   ET_CHNGPROC_H                     =
+*   ET_CHNGPROC_I                     =
+*   ET_DOC_FLOW_PNT                   =
+*   ET_FUND_H                         =
+*   ET_CLA_H                          =
+*   ET_SRV_REQ_H                      =
+*   ET_APPROVAL                       =
+*   ET_EXTENSION2                     =
+*   ET_CLA_I                          =
+* CHANGING
+*   CV_LOG_HANDLE                     =
+ EXCEPTIONS
+   DOCUMENT_NOT_FOUND                = 1
+   ERROR_OCCURRED                    = 2
+   DOCUMENT_LOCKED                   = 3
+   NO_CHANGE_AUTHORITY               = 4
+   NO_DISPLAY_AUTHORITY              = 5
+   NO_CHANGE_ALLOWED                 = 6
+   OTHERS                            = 7
+          .
+IF SY-SUBRC <> 0.
+* Implement suitable error handling here
+ENDIF.
