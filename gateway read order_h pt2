@@ -1,0 +1,708 @@
+  METHOD consissueset_get_entity.
+
+    INCLUDE: z_ir_constants, crm_object_names_con.
+
+    TYPES: BEGIN OF lty_doc_keys,
+             objkey_a TYPE crmt_object_guid,
+             objkey_b TYPE crmt_object_guid,
+           END OF lty_doc_keys.
+
+    DATA: ls_consissue         TYPE zcl_z_qma_mpc=>ts_consissue,
+          ls_key_tab           TYPE /iwbep/s_mgw_name_value_pair,
+          lt_requested_objects TYPE crmt_object_name_tab,
+          ls_orderadm_h        TYPE crmd_orderadm_h,
+          ls_rel_adm_h         TYPE crmd_orderadm_h,
+          lt_orderadm_h        TYPE crmt_orderadm_h_wrkt,
+          lt_customer_h        TYPE crmt_customer_h_wrkt,
+          ls_customer_h        TYPE LINE OF crmt_customer_h_wrkt,
+          lt_header_guid       TYPE crmt_object_guid_tab,
+          lt_status            TYPE crmt_status_wrkt,
+          ls_status            TYPE LINE OF crmt_status_wrkt,
+          lt_doc_flow          TYPE crmt_doc_flow_wrkt,
+          ls_doc_flow          TYPE LINE OF crmt_doc_flow_wrkt,
+          lt_doc_key           TYPE TABLE OF lty_doc_keys,
+          ls_doc_key           TYPE lty_doc_keys,
+          ls_orderadm_h_df     TYPE crmd_orderadm_h,
+          lt_orderadm_h_df     TYPE crmt_arc_orderadm_h_wrkt,
+          lv_objkey            TYPE crmt_doc_flow_id_wrk,
+          lt_partner           TYPE crmt_partner_external_wrkt,
+          ls_partner           TYPE LINE OF crmt_partner_external_wrkt,
+          lt_refobj            TYPE crmt_refobj_wrkt,
+          ls_refobj            TYPE LINE OF crmt_refobj_wrkt,
+          ls_bapiaddr2         TYPE bapiaddr2,
+          ls_bapiaddr3         TYPE bapiaddr3,
+          lr_msg_cont          TYPE REF TO /iwbep/if_message_container,
+          ls_refobject         TYPE crmt_srv_refobj_wrk,
+          lt_text              TYPE crmt_text_wrkt,
+          ls_text              TYPE crmt_text_wrk,
+          ls_lines             TYPE LINE OF comt_text_lines_t,
+          lv_first             TYPE boole_d,
+          lv_msg_text          TYPE bapi_msg,
+          lv_msg_v1	           TYPE symsgv,
+          lv_msg_v2	           TYPE symsgv,
+          lr_core              TYPE REF TO cl_crm_bol_core,             
+          lr_qs                TYPE REF TO cl_crm_bol_dquery_service,   
+          lr_col               TYPE REF TO cl_crm_bol_bo_col,           
+          lr_ent               TYPE REF TO cl_crm_bol_entity,           
+          lr_ent_hd            TYPE REF TO cl_crm_bol_entity,           
+          lr_result_ent        TYPE REF TO cl_crm_bol_entity,           
+          lv_object_id         TYPE string,                             
+          lv_text              TYPE string,                             
+          lr_ent_txt           TYPE REF TO cl_crm_bol_entity,           
+          lv_bp_desc           TYPE bu_descrip,                         
+          lt_bapiret           TYPE TABLE OF bapiret2.                  
+
+    READ TABLE it_key_tab INTO ls_key_tab WITH KEY name = 'ObjectId'.
+    IF sy-subrc = 0.
+*--> Check if object id is a valid consolidated issue
+      SELECT SINGLE * FROM crmd_orderadm_h INTO ls_orderadm_h  WHERE object_id = ls_key_tab-value AND
+                                                                     process_type = zir_proctype-known_issue." 'ZKI1'
+      IF sy-subrc = 0.
+        APPEND ls_orderadm_h-guid TO lt_header_guid.
+        INSERT gc_object_name-orderadm_h  INTO TABLE lt_requested_objects.
+        INSERT gc_object_name-customer_h  INTO TABLE lt_requested_objects.
+        INSERT gc_object_name-texts       INTO TABLE lt_requested_objects.
+        INSERT gc_object_name-status      INTO TABLE lt_requested_objects.
+        INSERT gc_object_name-doc_flow    INTO TABLE lt_requested_objects.
+        INSERT gc_object_name-partner     INTO TABLE lt_requested_objects.
+        INSERT gc_object_name-refobj     INTO TABLE lt_requested_objects.
+
+*--> Get consolidated issue from DB
+        CALL FUNCTION 'CRM_ORDER_READ'
+          EXPORTING
+            it_header_guid       = lt_header_guid
+            it_requested_objects = lt_requested_objects
+          IMPORTING
+            et_orderadm_h        = lt_orderadm_h
+            et_customer_h        = lt_customer_h
+            et_text              = lt_text
+            et_status            = lt_status
+            et_doc_flow          = lt_doc_flow
+            et_partner           = lt_partner
+            et_refobj            = lt_refobj
+          EXCEPTIONS
+            document_not_found   = 1
+            error_occurred       = 2
+            document_locked      = 3
+            no_change_authority  = 4
+            no_display_authority = 5
+            no_change_allowed    = 6
+            OTHERS               = 7.
+        IF sy-subrc <> 0.
+*--> Raise exception as error in reading in document
+          lr_msg_cont = /iwbep/if_mgw_conv_srv_runtime~get_message_container( ).
+          lv_msg_v1 = 'Consolidated Issue'.
+          lv_msg_v2 = ls_orderadm_h-object_id.
+          MESSAGE e002(ztp_qma_messages) WITH 'Consolidated Issue' ls_orderadm_h-object_id INTO lv_msg_text.
+          CALL METHOD lr_msg_cont->add_message
+            EXPORTING
+              iv_msg_type           = 'E'
+              iv_msg_id             = 'ZTP_QMA_MESSAGES'
+              iv_msg_number         = '002'
+              iv_msg_text           = lv_msg_text
+              iv_msg_v1             = lv_msg_v1
+              iv_msg_v2             = lv_msg_v2
+              iv_is_leading_message = abap_true
+              iv_entity_type        = iv_entity_name.
+
+          RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+            EXPORTING
+              message_container = lr_msg_cont.
+        ENDIF.
+
+*--> Get Header details - id, type & description
+        READ TABLE lt_orderadm_h INTO ls_orderadm_h WITH KEY object_id = ls_key_tab-value.
+        IF sy-subrc = 0.
+          ls_consissue-object_id = ls_orderadm_h-object_id.
+          ls_consissue-process_type = ls_orderadm_h-process_type.
+          ls_consissue-description = ls_orderadm_h-description.
+          ls_consissue-archived = ls_orderadm_h-zzarch. 
+
+*--> Get machine type, dev step and machine serial number
+          READ TABLE lt_customer_h INTO ls_customer_h WITH KEY guid = ls_orderadm_h-guid.
+          IF sy-subrc = 0.
+            ls_consissue-zzmachine_type = ls_customer_h-zzmachine_type.
+          ENDIF.
+
+*--> Get Status and its description
+          READ TABLE lt_status INTO ls_status WITH KEY guid = ls_orderadm_h-guid
+                                                       user_stat_proc = zir_status_profile-ztp_ci1. "'ZTP_KI1'
+          IF sy-subrc = 0.
+            ls_consissue-status = ls_status-status.
+            ls_consissue-status_desc = ls_status-txt30.
+          ENDIF.
+
+*--> Get CI driver
+          READ TABLE lt_partner INTO ls_partner WITH KEY partner_fct = zir_partner_functions-knownissue_dr."'ZIR00038'. "CI Driver
+          IF sy-subrc = 0.
+            CALL FUNCTION 'COM_PARTNER_ADDRESS_GET_COMPL'
+              EXPORTING
+                iv_addr_nr     = ls_partner-addr_nr
+                iv_addr_np     = ls_partner-addr_np
+                iv_addr_type   = ls_partner-addr_type
+                iv_addr_origin = ls_partner-addr_origin
+              IMPORTING
+                es_bapiaddr2   = ls_bapiaddr2
+                es_bapiaddr3   = ls_bapiaddr3
+              EXCEPTIONS
+                error_occurred = 1
+                OTHERS         = 2.
+            IF sy-subrc = 0.
+              IF ls_partner-addr_type = 2.
+                CONCATENATE ls_bapiaddr2-firstname
+                            ls_bapiaddr2-lastname INTO
+                            ls_consissue-ci_driver SEPARATED BY space.
+              ELSEIF ls_partner-addr_type = 3.
+                CONCATENATE ls_bapiaddr3-firstname
+                            ls_bapiaddr3-lastname INTO
+                            ls_consissue-ci_driver SEPARATED BY space.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+
+*--> Get Equip + Spare Part number and description
+        READ TABLE lt_refobj INTO ls_refobj WITH KEY zmat_type = 'N'.
+        IF sy-subrc = 0.
+          ls_consissue-part_number = ls_refobj-product_id.
+          ls_consissue-part_desc = ls_refobj-text_object.
+        ENDIF.
+
+*----> Get No.of TIS connected to CI
+        LOOP AT lt_doc_flow INTO ls_doc_flow.
+          ls_doc_key-objkey_a = ls_doc_flow-objkey_a.
+          ls_doc_key-objkey_b = ls_doc_flow-objkey_b.
+          APPEND ls_doc_key TO lt_doc_key.
+        ENDLOOP.
+
+        IF lt_doc_key[] IS NOT INITIAL.
+          SELECT DISTINCT process_type , object_id , status FROM zsearch_indx INTO TABLE @DATA(lt_docflow) FOR ALL ENTRIES IN @lt_doc_key 
+                                                                      WHERE ( guid = @lt_doc_key-objkey_a OR
+                                                                              guid = @lt_doc_key-objkey_b ) AND
+                                                                              process_type <> @zir_proctype-known_issue.
+          IF sy-subrc = 0.
+            DATA(lv_docflow_tmp) = lt_docflow[].
+            DELETE lt_docflow WHERE process_type <> zir_proctype-issue.
+            ls_consissue-tis_connected = lines( lt_docflow ).
+            lt_docflow = lv_docflow_tmp.
+            DELETE lt_docflow WHERE process_type <> zir_proctype-containm_sol.
+            DELETE lt_docflow WHERE status EQ zir_status_techn-cs_rejected OR status EQ zir_status_techn-cs_cancelled OR status EQ zir_status_techn-cs_expired. 
+            ls_consissue-cs_connected = lines( lt_docflow ).
+            lt_docflow = lv_docflow_tmp.
+            DELETE lt_docflow WHERE process_type <> zir_proctype-permanent_sol.
+            DELETE lt_docflow WHERE status EQ zir_status_techn-ps_replaced OR status EQ zir_status_techn-ps_cancelled OR status EQ zir_status_techn-ps_outdated. 
+            ls_consissue-ps_connected = lines( lt_docflow ).
+          ENDIF.
+        ENDIF.
+
+*--> Get problem description
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = zir_long_text_type-descr. "'S001'
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-problem_desc cl_abap_char_utilities=>cr_lf INTO ls_consissue-problem_desc.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-problem_desc ls_lines-tdline INTO ls_consissue-problem_desc.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-problem_desc ls_lines-tdline INTO ls_consissue-problem_desc.
+            ELSE.
+              CONCATENATE ls_consissue-problem_desc ls_lines-tdline INTO ls_consissue-problem_desc
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-problem_desc RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+
+*--> Get 5W2H change log same as in CRM WebUI
+*--> Get BOl object to reuse existing utility method zcl_ir_util=>get_update_timestamp
+*--> for getting 5W2H change log
+        lr_core = cl_crm_bol_core=>get_instance( ).
+        IF lr_core IS BOUND.
+          TRY.
+              CALL METHOD lr_core->load_component_set
+                EXPORTING
+                  iv_component_set_name = 'BT'.
+            CATCH cx_crm_genil_general_error.           "#EC NO_HANDLER
+          ENDTRY.
+        ENDIF.
+
+        TRY.
+            lr_qs = cl_crm_bol_dquery_service=>get_instance( iv_query_name = 'BTQ1Order' ).
+          CATCH cx_crm_unsupported_object.              "#EC NO_HANDLER
+        ENDTRY.
+
+*--> Add selection parameter TI ID
+        IF lr_qs IS BOUND.
+          lv_object_id = ls_orderadm_h-object_id.
+          CALL METHOD lr_qs->add_selection_param
+            EXPORTING
+              iv_attr_name = 'OBJECT_ID'
+              iv_sign      = 'I'
+              iv_option    = 'EQ'
+              iv_low       = lv_object_id.
+
+          lr_col ?= lr_qs->get_query_result( ).
+        ENDIF.
+
+        IF lr_col IS BOUND.
+          lr_result_ent ?= lr_col->if_bol_bo_col~get_first( ).
+        ENDIF.
+
+*--> Get related entities
+        IF lr_result_ent IS BOUND.
+          TRY.
+              lr_ent = lr_result_ent->get_related_entity( iv_relation_name = 'BTADVS1Ord' ).
+            CATCH cx_crm_genil_model_error.             "#EC NO_HANDLER
+          ENDTRY.
+        ENDIF.
+
+*--> Get header entity
+        IF lr_ent IS BOUND.
+          TRY.
+              lr_ent_hd = lr_ent->get_related_entity( iv_relation_name = 'BTOrderHeader' ).
+            CATCH cx_crm_genil_model_error.             "#EC NO_HANDLER
+          ENDTRY.
+        ENDIF.
+
+*--> Get Text header entity
+        IF lr_ent_hd IS BOUND.
+          TRY.
+              lr_ent_txt = lr_ent_hd->get_related_entity( iv_relation_name = 'BTHeaderTextSet' ).
+            CATCH cx_crm_genil_model_error.             "#EC NO_HANDLER
+          ENDTRY.
+        ENDIF.
+
+*--> Add 5W2H change log to problem description
+        IF lr_ent_txt IS BOUND.
+          lv_text = zcl_ir_util=>get_update_timestamp( lr_ent_txt ).
+          IF lv_text IS NOT INITIAL.
+            CONCATENATE '<5W2H Last Updated by' lv_text INTO lv_text SEPARATED BY space.
+            CONCATENATE lv_text '>' cl_abap_char_utilities=>newline INTO lv_text.
+            CONCATENATE lv_text ls_consissue-problem_desc INTO ls_consissue-problem_desc
+             SEPARATED BY cl_abap_char_utilities=>newline.
+          ENDIF.
+        ENDIF.
+
+*--> Get possible reason
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = zir_long_text_type-poss_reason."'ZIR4'
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-possible_reason cl_abap_char_utilities=>cr_lf INTO ls_consissue-possible_reason.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-possible_reason ls_lines-tdline INTO ls_consissue-possible_reason.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-possible_reason ls_lines-tdline INTO ls_consissue-possible_reason.
+            ELSE.
+              CONCATENATE ls_consissue-possible_reason ls_lines-tdline INTO ls_consissue-possible_reason
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-possible_reason RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get Symptoms
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = zir_long_text_type-ki_symptoms. "'ZK16' 
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-symptoms cl_abap_char_utilities=>cr_lf INTO ls_consissue-symptoms.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-symptoms ls_lines-tdline INTO ls_consissue-symptoms.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-symptoms ls_lines-tdline INTO ls_consissue-symptoms.
+            ELSE.
+              CONCATENATE ls_consissue-symptoms ls_lines-tdline INTO ls_consissue-symptoms
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-symptoms RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+
+*--> Get WHAT_PROB_ZI01
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI01'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-what_prob_zi01 cl_abap_char_utilities=>cr_lf INTO ls_consissue-what_prob_zi01.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-what_prob_zi01 ls_lines-tdline INTO ls_consissue-what_prob_zi01.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-what_prob_zi01 ls_lines-tdline INTO ls_consissue-what_prob_zi01.
+            ELSE.
+              CONCATENATE ls_consissue-what_prob_zi01 ls_lines-tdline INTO ls_consissue-what_prob_zi01
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-what_prob_zi01 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get WHAT_NOT_PROB_ZI02
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI02'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-what_not_prob_zi02 cl_abap_char_utilities=>cr_lf INTO ls_consissue-what_not_prob_zi02.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-what_not_prob_zi02 ls_lines-tdline INTO ls_consissue-what_not_prob_zi02.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-what_not_prob_zi02 ls_lines-tdline INTO ls_consissue-what_not_prob_zi02.
+            ELSE.
+              CONCATENATE ls_consissue-what_not_prob_zi02 ls_lines-tdline INTO ls_consissue-what_not_prob_zi02
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-what_not_prob_zi02 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf.
+
+*--> Get WHO_OBS_ZI03
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI03'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-who_obs_zi03 cl_abap_char_utilities=>cr_lf INTO ls_consissue-who_obs_zi03.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-who_obs_zi03 ls_lines-tdline INTO ls_consissue-who_obs_zi03.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-who_obs_zi03 ls_lines-tdline INTO ls_consissue-who_obs_zi03.
+            ELSE.
+              CONCATENATE ls_consissue-who_obs_zi03 ls_lines-tdline INTO ls_consissue-who_obs_zi03
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-who_obs_zi03 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get WHO_NOT_OBS_ZI04
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI04'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'.
+              CONCATENATE ls_consissue-who_not_obs_zi04 cl_abap_char_utilities=>cr_lf INTO ls_consissue-who_not_obs_zi04.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-who_not_obs_zi04 ls_lines-tdline INTO ls_consissue-who_not_obs_zi04.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-who_not_obs_zi04 ls_lines-tdline INTO ls_consissue-who_not_obs_zi04.
+            ELSE.
+              CONCATENATE ls_consissue-who_not_obs_zi04 ls_lines-tdline INTO ls_consissue-who_not_obs_zi04
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-who_not_obs_zi04 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get WHERE_OBS_ZI05
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI05'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-where_obs_zi05 cl_abap_char_utilities=>cr_lf INTO ls_consissue-where_obs_zi05.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-where_obs_zi05 ls_lines-tdline INTO ls_consissue-where_obs_zi05.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-where_obs_zi05 ls_lines-tdline INTO ls_consissue-where_obs_zi05.
+            ELSE.
+              CONCATENATE ls_consissue-where_obs_zi05 ls_lines-tdline INTO ls_consissue-where_obs_zi05
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-where_obs_zi05 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get WHERE_NOT_OBS_ZI06
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI06'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-where_not_obs_zi06 cl_abap_char_utilities=>cr_lf INTO ls_consissue-where_not_obs_zi06.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-where_not_obs_zi06 ls_lines-tdline INTO ls_consissue-where_not_obs_zi06.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-where_not_obs_zi06 ls_lines-tdline INTO ls_consissue-where_not_obs_zi06.
+            ELSE.
+              CONCATENATE ls_consissue-where_not_obs_zi06 ls_lines-tdline INTO ls_consissue-where_not_obs_zi06
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-where_not_obs_zi06 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get WHEN_OBS_ZI07
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI07'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-when_obs_zi07 cl_abap_char_utilities=>cr_lf INTO ls_consissue-when_obs_zi07.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-when_obs_zi07 ls_lines-tdline INTO ls_consissue-when_obs_zi07.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-when_obs_zi07 ls_lines-tdline INTO ls_consissue-when_obs_zi07.
+            ELSE.
+              CONCATENATE ls_consissue-when_obs_zi07 ls_lines-tdline INTO ls_consissue-when_obs_zi07
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-when_obs_zi07 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf.
+
+*--> Get WHEN_NOT_OBS_ZI08
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI08'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-when_not_obs_zi08 cl_abap_char_utilities=>cr_lf INTO ls_consissue-when_not_obs_zi08.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-when_not_obs_zi08 ls_lines-tdline INTO ls_consissue-when_not_obs_zi08.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-when_not_obs_zi08 ls_lines-tdline INTO ls_consissue-when_not_obs_zi08.
+            ELSE.
+              CONCATENATE ls_consissue-when_not_obs_zi08 ls_lines-tdline INTO ls_consissue-when_not_obs_zi08
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-when_not_obs_zi08 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf.
+
+*--> Get WHY_PROB_ZI09
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI09'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-why_prob_zi09 cl_abap_char_utilities=>cr_lf INTO ls_consissue-why_prob_zi09.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-why_prob_zi09 ls_lines-tdline INTO ls_consissue-why_prob_zi09.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-why_prob_zi09 ls_lines-tdline INTO ls_consissue-why_prob_zi09.
+            ELSE.
+              CONCATENATE ls_consissue-why_prob_zi09 ls_lines-tdline INTO ls_consissue-why_prob_zi09
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-why_prob_zi09 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get WHY_NOT_PROB_ZI10
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI10'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-why_not_prob_zi10 cl_abap_char_utilities=>cr_lf INTO ls_consissue-why_not_prob_zi10.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-why_not_prob_zi10 ls_lines-tdline INTO ls_consissue-why_not_prob_zi10.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-why_not_prob_zi10 ls_lines-tdline INTO ls_consissue-why_not_prob_zi10.
+            ELSE.
+              CONCATENATE ls_consissue-why_not_prob_zi10 ls_lines-tdline INTO ls_consissue-why_not_prob_zi10
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-why_not_prob_zi10 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf.
+
+*--> Get HOW_OBS_ZI11
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI11'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-how_obs_zi11 cl_abap_char_utilities=>cr_lf INTO ls_consissue-how_obs_zi11.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-how_obs_zi11 ls_lines-tdline INTO ls_consissue-how_obs_zi11.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-how_obs_zi11 ls_lines-tdline INTO ls_consissue-how_obs_zi11.
+            ELSE.
+              CONCATENATE ls_consissue-how_obs_zi11 ls_lines-tdline INTO ls_consissue-how_obs_zi11
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-how_obs_zi11 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get HOW_NOT_OBS_ZI12
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI12'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'.
+              CONCATENATE ls_consissue-how_not_obs_zi12 cl_abap_char_utilities=>cr_lf INTO ls_consissue-how_not_obs_zi12.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-how_not_obs_zi12 ls_lines-tdline INTO ls_consissue-how_not_obs_zi12.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-how_not_obs_zi12 ls_lines-tdline INTO ls_consissue-how_not_obs_zi12.
+            ELSE.
+              CONCATENATE ls_consissue-how_not_obs_zi12 ls_lines-tdline INTO ls_consissue-how_not_obs_zi12
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-how_not_obs_zi12 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get HOW_MANY_ZI13
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI13'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-how_many_zi13 cl_abap_char_utilities=>cr_lf INTO ls_consissue-how_many_zi13.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-how_many_zi13 ls_lines-tdline INTO ls_consissue-how_many_zi13.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-how_many_zi13 ls_lines-tdline INTO ls_consissue-how_many_zi13.
+            ELSE.
+              CONCATENATE ls_consissue-how_many_zi13 ls_lines-tdline INTO ls_consissue-how_many_zi13
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-how_many_zi13 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+*--> Get HOW_MANY_NOT_ZI14
+        READ TABLE lt_text INTO ls_text WITH KEY stxh-tdid = 'ZI14'.
+        IF sy-subrc = 0.
+          CLEAR: lv_first.
+          LOOP AT ls_text-lines INTO ls_lines.
+            IF lv_first IS NOT INITIAL AND ls_lines-tdformat = '*'. 
+              CONCATENATE ls_consissue-how_many_not_zi14 cl_abap_char_utilities=>cr_lf INTO ls_consissue-how_many_not_zi14.
+            ENDIF.
+            IF lv_first IS INITIAL.
+              lv_first = abap_true.
+              CONCATENATE ls_consissue-how_many_not_zi14 ls_lines-tdline INTO ls_consissue-how_many_not_zi14.
+            ELSEIF ls_lines-tdformat IS NOT INITIAL.
+              CONCATENATE ls_consissue-how_many_not_zi14 ls_lines-tdline INTO ls_consissue-how_many_not_zi14.
+            ELSE.
+              CONCATENATE ls_consissue-how_many_not_zi14 ls_lines-tdline INTO ls_consissue-how_many_not_zi14
+              SEPARATED BY space.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SHIFT ls_consissue-how_many_not_zi14 RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+
+        "Area, Posting Date, Cii, Failure Mode and Failure Type
+        SELECT SINGLE  area, posting_date, zzcii, fault_mode, failure_type
+            FROM zsearch_indx INTO @DATA(ls_search_indx) WHERE object_id = @ls_consissue-object_id.
+        IF sy-subrc = 0.
+          ls_consissue-area = ls_search_indx-area.
+          ls_consissue-cii = ls_search_indx-zzcii.
+          ls_consissue-fault_mode = ls_search_indx-fault_mode.
+          ls_consissue-failure_type = ls_search_indx-failure_type.
+        ENDIF.
+
+        "Creation Date
+        ls_consissue-creation_date = lt_orderadm_h[ guid = ls_orderadm_h-guid ]-created_at.
+
+        "Responsible Group
+
+        SELECT SINGLE resp_group_bp_no FROM zsearch_pfct INTO @DATA(lv_resp_group) WHERE object_id = @ls_consissue-object_id.
+        IF sy-subrc = 0 AND lv_resp_group IS NOT INITIAL.
+          CALL FUNCTION 'BUPA_DESCRIPTION_GET'
+            EXPORTING
+              iv_partner     = CONV bu_partner( lv_resp_group )
+            IMPORTING
+              ev_description = lv_bp_desc
+            TABLES
+              et_return      = lt_bapiret.
+          ls_consissue-resp_group_name = lv_bp_desc.
+          IF ls_consissue-resp_group_name IS INITIAL.
+            ls_consissue-resp_group_name = zcl_ir_util=>get_partner_name( CONV #( lv_resp_group  ) ).
+          ENDIF.
+          REPLACE ALL OCCURRENCES OF ' /' IN ls_consissue-resp_group_name WITH ''.
+        ENDIF.
+
+        "Proposed Next Steps
+        ls_consissue-info_to_mc =  zcl_im_search_indx_badi=>get_stxl_text(
+                                          EXPORTING iv_id =  'ZKI1'
+                                                    iv_object = 'CRM_ORDERH'
+                                                    iv_language = sy-langu
+                                                    iv_newline = 'X' 
+                                                    iv_name = CONV tdobname( ls_orderadm_h-guid ) ).
+
+        SHIFT ls_consissue-info_to_mc RIGHT DELETING TRAILING cl_abap_char_utilities=>cr_lf. 
+        MOVE-CORRESPONDING ls_consissue TO er_entity.
+      ELSE.
+*--> Raise exception as object id is invalid
+        lr_msg_cont = /iwbep/if_mgw_conv_srv_runtime~get_message_container( ).
+        lv_msg_v1 = ls_key_tab-value.
+        lv_msg_v2 = 'Consolidated Issue'.
+        MESSAGE e001(ztp_qma_messages) WITH ls_key_tab-value 'Consolidated Issue' INTO lv_msg_text.
+        CALL METHOD lr_msg_cont->add_message
+          EXPORTING
+            iv_msg_type           = 'E'
+            iv_msg_id             = 'ZTP_QMA_MESSAGES'
+            iv_msg_number         = '001'
+            iv_msg_text           = lv_msg_text
+            iv_msg_v1             = lv_msg_v1
+            iv_msg_v2             = lv_msg_v2
+            iv_is_leading_message = abap_true
+            iv_entity_type        = iv_entity_name.
+
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+          EXPORTING
+            message_container = lr_msg_cont.
+      ENDIF.
+    ELSE.
+*--> Raise exception as no object_id is received
+      MESSAGE e000(ztp_qma_messages)  INTO lv_msg_text.
+      lv_msg_v1 = 'Consolidated Issue'.
+      CALL METHOD lr_msg_cont->add_message
+        EXPORTING
+          iv_msg_type           = 'E'
+          iv_msg_id             = 'ZTP_QMA_MESSAGES'
+          iv_msg_number         = '000'
+          iv_msg_text           = lv_msg_text
+          iv_msg_v1             = lv_msg_v1
+          iv_is_leading_message = abap_true
+          iv_entity_type        = iv_entity_name.
+
+      RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+        EXPORTING
+          message_container = lr_msg_cont.
+    ENDIF.
+
+  ENDMETHOD.
