@@ -1,0 +1,90 @@
+  METHOD if_htmlb_tableview_iterator~render_cell_start.
+
+    DATA: lr_input       TYPE REF TO cl_thtmlb_link,
+          lr_http_client TYPE REF TO if_http_client.
+
+    CASE p_tableview_id.
+      WHEN OTHERS.
+        CASE p_column_key.
+          WHEN 'BAMBOO_ID'.
+            lr_input ?= p_replacement_bee.
+            TRY.
+
+                DATA(lr_doc_flow_cn) = CAST zl_srqm_rel_relatedr3_cn00( me->typed_context->btdocflow ).
+                DATA(lv_bamboo_id) = lr_doc_flow_cn->bamboo_get_by_index( p_row_index ).
+
+                CHECK lv_bamboo_id IS NOT INITIAL.
+
+                CALL METHOD cl_http_client=>create_by_destination
+                  EXPORTING
+                    destination              = 'BAMBOO'
+                  IMPORTING
+                    client                   = lr_http_client
+                  EXCEPTIONS
+                    argument_not_found       = 1
+                    destination_not_found    = 2
+                    destination_no_authority = 3
+                    plugin_not_active        = 4
+                    internal_error           = 5
+                    OTHERS                   = 6.
+
+                CHECK sy-subrc = 0
+                AND lr_http_client IS BOUND.
+
+                DATA(lv_link) = |{ lr_http_client->create_abs_url( ) }index.html?wdgt=activform&idCase={ lv_bamboo_id }|.
+
+                lr_input->onclientclick = |return window.open('{ lv_link }','popup','width=500,height=500')|.
+                p_replacement_bee ?= lr_input.
+
+              CATCH cx_root.
+            ENDTRY.
+        ENDCASE.
+    ENDCASE.
+
+  ENDMETHOD.
+  
+    METHOD bamboo_get_by_index.
+
+    DATA(lr_iterator) = me->collection_wrapper->get_iterator( ).
+    CHECK lr_iterator IS BOUND.
+    DATA(lr_entry) = lr_iterator->get_by_index( iv_index ).
+    CHECK lr_entry IS BOUND.
+    lr_iterator->find_bo( lr_entry ).
+    CALL METHOD me->get_objectid
+      EXPORTING
+        attribute_path = ''
+        iterator       = lr_iterator
+      RECEIVING
+        value          = DATA(lv_object_id).
+    CHECK lv_object_id IS NOT INITIAL.
+    READ TABLE me->gt_bamboo_cases
+    WITH KEY claim_id = lv_object_id
+    INTO DATA(ls_bamboo_case).
+    CHECK sy-subrc = 0.
+    rv_case_id = ls_bamboo_case-bamboo_case_tech_id.
+  ENDMETHOD.
+  
+  
+  METHOD on_new_focus.
+       IF lt_claims[] IS NOT INITIAL
+        AND me->mr_entity_docflowset IS NOT INITIAL.
+        DATA(lr_header) = me->mr_entity_docflowset->get_parent( ).
+        CHECK lr_header IS BOUND.
+        DATA(lv_ti_id) = CONV crmt_object_id( lr_header->get_property_as_string( 'OBJECT_ID' ) ).
+        SELECT * FROM ztp_bamboo_cases
+          FOR ALL ENTRIES IN @lt_claims
+          WHERE claim_id = @lt_claims-table_line
+          AND ti_id = @lv_ti_id
+          INTO TABLE @me->gt_bamboo_cases.
+        
+        LOOP AT lt_claims INTO DATA(lv_claim_id).
+          DATA(ls_bamboo_case) =
+          zcl_ir_bamboo_controller=>get_case_from_save(
+          iv_ti_id = lv_ti_id iv_claim_id = lv_claim_id ).
+          IF ls_bamboo_case IS NOT INITIAL.
+            APPEND ls_bamboo_case TO me->gt_bamboo_cases.
+          ENDIF.
+        ENDLOOP.
+
+      ENDIF.
+  ENDMETHOD.
