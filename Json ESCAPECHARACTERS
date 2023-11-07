@@ -1,0 +1,13 @@
+REPORT Z_ESCAPE_CHARACTER.
+data lv_string type string VALUE 'demo " text " example'.
+data lv_result type string.
+write: 'raw: ',  lv_string .
+lv_result = escape( val = lv_string
+                     format = cl_abap_format=>e_json_string ).
+write:/ 'converted: ',  lv_result .
+
+
+____
+execution results:
+raw:  demo " text " example
+converted:  demo \" text \" example
